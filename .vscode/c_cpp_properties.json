@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}",
+                "/usr/include",
+                "/usr/local/include",
+                "/usr/lib/modules/5.15.146-1-MANJARO/build/arch/x86/include/",
+                "/usr/lib/modules/5.15.146-1-MANJARO/build/include/",
+                "/usr/lib/modules/5.15.146-1-MANJARO/build/arch/x86/include/generated/"
+            ],
+            "defines": [
+                "__KERNEL__",
+                "MODULE"
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++11",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

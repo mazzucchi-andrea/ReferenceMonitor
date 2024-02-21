@@ -11,7 +11,7 @@ clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 
 load:
-	insmod the_reference_monitor.ko the_syscall_table=$(A) password=$(B)
+	insmod the_reference_monitor.ko the_syscall_table=$(A) the_password=$(B)
 
 unload:
 	rmmod the_reference_monitor.ko

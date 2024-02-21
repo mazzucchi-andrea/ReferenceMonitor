@@ -6,7 +6,9 @@
 #include <linux/errno.h>
 #include <linux/device.h>
 #include <linux/kprobes.h>
+#include <linux/namei.h>
 #include <linux/mm.h>
+#include <linux/path.h>
 #include <linux/sched.h>
 #include <linux/version.h>
 #include <linux/string.h>
@@ -14,6 +16,7 @@
 #include <linux/syscalls.h>
 #include <linux/crypto.h>
 #include <linux/slab.h>
+#include <linux/list.h>
 #include <crypto/hash.h>
 
 #include "lib/include/scth.h"
@@ -23,19 +26,18 @@ MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
 
 #define MODNAME "REFERENCE_MONITOR"
 
+unsigned long the_syscall_table = 0x0;
+module_param(the_syscall_table, ulong, 0660);
+
 #define SHA256_DIGEST_SIZE 256
 #define PASSWORD_MAX_LEN 64
 #define HASH_LEN SHA256_DIGEST_SIZE
 
-unsigned long the_syscall_table = 0x0;
-module_param(the_syscall_table, ulong, 0660);
-
 u8 digest_password[SHA256_DIGEST_SIZE];
-char *password;
-module_param(password, charp, 0);
+char *the_password;
+module_param(the_password, charp, 0);
 
 unsigned long the_ni_syscall;
-
 unsigned long new_sys_call_array[] = {0x0, 0x0, 0x0};
 #define HACKED_ENTRIES (int)(sizeof(new_sys_call_array) / sizeof(unsigned long))
 int restore[HACKED_ENTRIES] = {[0 ...(HACKED_ENTRIES - 1)] - 1};
@@ -50,7 +52,7 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
         tfm = crypto_alloc_shash("sha256", 0, 0);
         if (IS_ERR(tfm))
         {
-                pr_err("Unable to allocate crypto hash\n");
+                printk("%s: Unable to allocate crypto hash\n", MODNAME);
                 return PTR_ERR(tfm);
         }
 
@@ -67,7 +69,7 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
         ret = crypto_shash_digest(desc, password, password_len, digest);
         if (ret)
         {
-                pr_err("Error hashing password: %d\n", ret);
+                printk("%s: Error hashing password: %d\n", MODNAME, ret);
                 goto out_free_digest;
         }
 
@@ -82,27 +84,196 @@ out_free_tfm:
         return ret;
 }
 
+int check_password_length(char *password)
+{
+        if (strlen(password) > PASSWORD_MAX_LEN || strlen(password) <= 0)
+                return -1;
+        return 0;
+}
+
+int check_password(char *password)
+{
+        u8 digest[SHA256_DIGEST_SIZE];
+
+        // check old_password length
+        if (check_password_length(password) < 0)
+        {
+                return -1;
+        }
+        if (hash_password(password, strlen(password), digest) < 0)
+        {
+                return -1;
+        }
+
+        if (memcmp(digest_password, digest, SHA256_DIGEST_SIZE) != 0)
+                return -1;
+        return 0;
+}
+
 #define AUDIT if (1)
 
+#define ON 0
+#define OFF 1
+#define REC_ON 2
+#define REC_OFF 3
+
+int monitor_state = ON;
+
+void print_current_monitor_state(void)
+{
+        switch (monitor_state)
+        {
+        case ON:
+                printk("%s: current state is ON.\n", MODNAME);
+                break;
+        case OFF:
+                printk("%s: current state is OFF.\n", MODNAME);
+                break;
+        case REC_ON:
+                printk("%s: current state is REC_ON.\n", MODNAME);
+                break;
+        case REC_OFF:
+                printk("%s: current state is REC_OFF.\n", MODNAME);
+                break;
+        default:
+                break;
+        }
+}
+
+#define ADD 0
+#define REMOVE 1
+
+struct path_entry
+{
+        struct list_head list;
+        char *path;
+};
+
+LIST_HEAD(paths);
+
+int add_path(const char *new_path)
+{
+        struct path_entry *new_path_entry = kmalloc(sizeof(struct path_entry), GFP_KERNEL);
+        if (new_path_entry == NULL)
+        {
+                printk("%s: Memory allocation failed\n", MODNAME);
+                return -1;
+        }
+
+        new_path_entry->path = kmalloc(strlen(new_path), GFP_KERNEL);
+        if (new_path_entry->path == NULL)
+        {
+                printk("%s: Memory allocation failed\n", MODNAME);
+                kfree(new_path_entry->path);
+                kfree(new_path_entry);
+                return -1;
+        }
+        strcpy(new_path_entry->path, new_path);
+
+        INIT_LIST_HEAD(&new_path_entry->list);
+
+        list_add_tail(&new_path_entry->list, &paths);
+        return 0;
+}
+
+int remove_path(const char *path_to_remove)
+{
+        struct path_entry *entry, *tmp;
+        list_for_each_entry_safe(entry, tmp, &paths, list)
+        {
+                if (strcmp(entry->path, path_to_remove) == 0)
+                {
+                        list_del(&entry->list);
+                        kfree(entry->path);
+                        kfree(entry);
+                        printk("%s: Path '%s' removed.\n", MODNAME, path_to_remove);
+                        return 0;
+                }
+        }
+        printk("%s: Path '%s' not found in the list.\n", MODNAME, path_to_remove);
+        return -1;
+}
+
+void cleanup_list(void)
+{
+        struct path_entry *entry, *tmp;
+
+        list_for_each_entry_safe(entry, tmp, &paths, list)
+        {
+                list_del(&entry->list);
+
+                kfree(entry->path);
+
+                kfree(entry);
+        }
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-__SYSCALL_DEFINEx(2, _change_state, char *, passwd, int, state)
+__SYSCALL_DEFINEx(2, _change_state, char *, password, int, state)
 {
 #else
-asmlinkage long sys_change_state(char *passwd, int state)
+asmlinkage long sys_change_state(char *password, int state)
 {
 #endif
         printk("%s: _change_state called.\n", MODNAME);
+
+        if (check_password(password) < 0)
+        {
+                printk("%s: invalid password.\n", MODNAME);
+                return -1;
+        }
+
+        print_current_monitor_state();
+
+        if (state < 0 || state > 3)
+        {
+                printk("%s: invalid state %d.\n", MODNAME, state);
+                return -1;
+        }
+
+        monitor_state = state;
+
+        printk("%s: state changed.\n", MODNAME);
+
+        print_current_monitor_state();
+
         return 0;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-__SYSCALL_DEFINEx(3, _edit_path, char *, passwd, char *, path, int, to_do)
+__SYSCALL_DEFINEx(3, _edit_path, char *, password, char *, path, int, mode)
 {
 #else
-asmlinkage long sys_edit_path(char *passwd, char *path, int to_do)
+asmlinkage long sys_edit_path(char *password, char *path, int mode)
 {
 #endif
+        struct path path_struct;
+
         printk("%s: _edit_path called.\n", MODNAME);
+
+        if (check_password(password) < 0)
+        {
+                printk("%s: invalid password.\n", MODNAME);
+                return -1;
+        }
+
+        if (kern_path(path, LOOKUP_FOLLOW, &path_struct) < 0)
+        {
+                printk("%s: Error resolving path.\n", MODNAME);
+                return -1;
+        }
+
+        if (mode == ADD)
+        {
+                if (add_path(path) < 0)
+                        return -1;
+        }
+        else if (mode == REMOVE)
+        {
+                if (remove_path(path) < 0)
+                        return -1;
+        }
+
         return 0;
 }
 
@@ -114,44 +285,31 @@ asmlinkage long sys_change_password(char *old_password, char *new_password)
 {
 #endif
         int ret;
-        u8 old_digest[SHA256_DIGEST_SIZE];
         u8 new_digest[SHA256_DIGEST_SIZE];
 
         printk("%s: _change_password called.\n", MODNAME);
 
-        // check old_password length
-        if (strlen(old_password) > PASSWORD_MAX_LEN || strlen(old_password) <= 0)
+        if (check_password(old_password) < 0)
         {
                 printk("%s: invalid password.\n", MODNAME);
                 return -1;
         }
-        ret = hash_password(old_password, strlen(old_password), old_digest);
-        if (ret < 0)
-        {
-                printk("%s: failing hashing old password.\n", MODNAME);
-                return -1;
-        }
 
-        // check new_password length
-        if (strlen(new_password) > PASSWORD_MAX_LEN || strlen(new_password) <= 0)
+        if (check_password_length(new_password) < 0)
         {
                 printk("%s: invalid new password length.\n", MODNAME);
                 return -1;
         }
+
         ret = hash_password(new_password, strlen(new_password), new_digest);
         if (ret < 0)
         {
                 printk("%s: failing hashing new password.\n", MODNAME);
-                return -1;
-        }
-
-        if (memcmp(digest_password, old_digest, SHA256_DIGEST_SIZE) != 0)
-        {
-                printk("%s: invalid password.\n", MODNAME);
-                return -1;
+                return ret;
         }
 
         memcpy(digest_password, new_digest, HASH_LEN);
+
         printk("%s: password changed.\n", MODNAME);
         return 0;
 }
@@ -165,9 +323,7 @@ long sys_change_password = (unsigned long)__x64_sys_change_password;
 
 int init_module(void)
 {
-
-        int i;
-        int ret;
+        int i, ret;
 
         if (the_syscall_table == 0x0)
         {
@@ -175,19 +331,17 @@ int init_module(void)
                 return -1;
         }
 
-        // check password length
-        if (strlen(password) > PASSWORD_MAX_LEN || strlen(password) <= 0)
+        if (check_password_length(the_password) < 0)
         {
                 printk("%s: invalid password length.\n", MODNAME);
-                return -1;
+                return ret;
         }
 
-        // hash password
-        ret = hash_password(password, strlen(password), digest_password);
-        if (ret)
+        ret = hash_password(the_password, strlen(the_password), digest_password);
+        if (ret < 0)
         {
                 printk("%s: failed to hash password: %d\n", MODNAME, ret);
-                return -1;
+                return ret;
         }
         else
         {
@@ -228,7 +382,6 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-
         int i;
 
         printk("%s: shutting down\n", MODNAME);
@@ -239,5 +392,8 @@ void cleanup_module(void)
                 ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
         }
         protect_memory();
+
         printk("%s: sys-call table restored to its original content\n", MODNAME);
+
+        cleanup_list();
 }

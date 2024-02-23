@@ -17,6 +17,7 @@
 #include <linux/crypto.h>
 #include <linux/slab.h>
 #include <linux/list.h>
+#include <linux/cred.h>
 #include <crypto/hash.h>
 
 #include "lib/include/scth.h"
@@ -110,6 +111,14 @@ int check_password(char *password)
         return 0;
 }
 
+int check_root(void)
+{
+        kuid_t euid = current_cred()->euid;
+        if (euid.val != 0)
+                return -1;
+        return 0;
+}
+
 #define AUDIT if (1)
 
 #define ON 0
@@ -138,6 +147,13 @@ void print_current_monitor_state(void)
         default:
                 break;
         }
+}
+
+int check_rec_state(void)
+{
+        if (monitor_state == ON || monitor_state == OFF)
+                return -1;
+        return 0;
 }
 
 #define ADD 0
@@ -194,6 +210,19 @@ int remove_path(const char *path_to_remove)
         return -1;
 }
 
+void print_paths(void)
+{
+        struct path_entry *entry;
+
+        printk("%s: Paths:\n", MODNAME);
+
+        // Iterate over each entry in the list
+        list_for_each_entry(entry, &paths, list)
+        {
+                printk("%s: %s\n", MODNAME, entry->path);
+        }
+}
+
 void cleanup_list(void)
 {
         struct path_entry *entry, *tmp;
@@ -216,6 +245,12 @@ asmlinkage long sys_change_state(char *password, int state)
 {
 #endif
         printk("%s: _change_state called.\n", MODNAME);
+
+        if (check_root() < 0)
+        {
+                printk("%s: only root can change the monitor state.\n", MODNAME);
+                return -1;
+        }
 
         if (check_password(password) < 0)
         {
@@ -251,9 +286,21 @@ asmlinkage long sys_edit_path(char *password, char *path, int mode)
 
         printk("%s: _edit_path called.\n", MODNAME);
 
+        if (check_root() < 0)
+        {
+                printk("%s: only root can edit the monitor paths.\n", MODNAME);
+                return -1;
+        }
+
         if (check_password(password) < 0)
         {
                 printk("%s: invalid password.\n", MODNAME);
+                return -1;
+        }
+
+        if (check_rec_state() < 0)
+        {
+                printk("%s: invalid monitor state.\n", MODNAME);
                 return -1;
         }
 
@@ -274,6 +321,8 @@ asmlinkage long sys_edit_path(char *password, char *path, int mode)
                         return -1;
         }
 
+        print_paths();
+
         return 0;
 }
 
@@ -288,6 +337,12 @@ asmlinkage long sys_change_password(char *old_password, char *new_password)
         u8 new_digest[SHA256_DIGEST_SIZE];
 
         printk("%s: _change_password called.\n", MODNAME);
+
+        if (check_root() < 0)
+        {
+                printk("%s: only root can change the monitor password.\n", MODNAME);
+                return -1;
+        }
 
         if (check_password(old_password) < 0)
         {

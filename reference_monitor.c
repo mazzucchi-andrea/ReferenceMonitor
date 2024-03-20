@@ -21,11 +21,10 @@
 #include <crypto/hash.h>
 
 #include "lib/include/scth.h"
+#include "logfilefs.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
-
-#define MODNAME "REFERENCE_MONITOR"
 
 unsigned long the_syscall_table = 0x0;
 module_param(the_syscall_table, ulong, 0660);
@@ -376,6 +375,15 @@ long sys_change_password = (unsigned long)__x64_sys_change_password;
 #else
 #endif
 
+// file system structure
+static struct file_system_type logfilefs_type = {
+    .owner = THIS_MODULE,
+    .name = "logfilefs",
+    .mount = logfilefs_mount,
+    .kill_sb = logfilefs_kill_superblock,
+};
+
+
 int init_module(void)
 {
         int i, ret;
@@ -431,6 +439,13 @@ int init_module(void)
         protect_memory();
 
         printk("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
+
+        // register filesystem
+        ret = register_filesystem(&logfilefs_type);
+        if (likely(ret == 0))
+                printk("%s: sucessfully registered singlefilefs\n", MODNAME);
+        else
+                printk("%s: failed to register singlefilefs - error %d", MODNAME, ret);
 
         return 0;
 }

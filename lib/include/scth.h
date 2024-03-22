@@ -1,6 +1,4 @@
-
 #ifndef _SCTH_
-
 #define _SCTH_
 
 void protect_memory(void);

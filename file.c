@@ -7,8 +7,10 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/minmax.h>
 
 #include "logfilefs.h"
+#include "reference_monitor.h"
 
 int logfilefs_open(struct inode *inode, struct file *filp)
 {
@@ -66,54 +68,50 @@ ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *
     return len - ret;
 }
 
-ssize_t logfilefs_write(struct file *filp, const char __user *buf, size_t len, loff_t *off) // off ignored
+ssize_t logfilefs_write(struct file *filp, const char __user *buf, size_t len, loff_t *off)
 {
     struct buffer_head *bh = NULL;
     struct inode *the_inode = filp->f_inode;
     uint64_t file_size = the_inode->i_size;
     loff_t maxbytes = the_inode->i_sb->s_maxbytes;
-    int ret;
+    ssize_t bytes_written = 0;
     loff_t offset = file_size; // with this offset every write is an append operation
     int block_to_write;
-    int i = 0;
 
     printk("%s: write operation called with len %ld", MODNAME, len);
 
-    if (file_size == maxbytes)
-    {
-        // fs full
-    }
-    else if (file_size + len > maxbytes)
-    {
+    if (file_size == maxbytes) 
+        return -ENOSPC; // fs full
+
+    if (file_size + len > maxbytes)
         len = maxbytes - file_size; // can't write all the bytes
-    }
 
-    block_to_write = offset / DEFAULT_BLOCK_SIZE + 2;
-
-    bh = (struct buffer_head *)sb_bread(filp->f_path.dentry->d_inode->i_sb, block_to_write);
-    if (!bh)
-        return -EIO;
-
-    while (i < len)
+    while (bytes_written < len)
     {
-        bh->b_data[offset] = buf[i];
-        i++;
-        offset++;
-        if (offset == DEFAULT_BLOCK_SIZE)
+        int bytes_to_write = min(len - bytes_written, (size_t)(DEFAULT_BLOCK_SIZE - (offset % DEFAULT_BLOCK_SIZE)));
+        block_to_write = offset / DEFAULT_BLOCK_SIZE + 2;
+
+        bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, block_to_write);
+        if (!bh)
         {
-            mark_buffer_dirty(bh);
-            brelse(bh);
-            block_to_write++;
-            bh = (struct buffer_head *)sb_bread(filp->f_path.dentry->d_inode->i_sb, block_to_write);
-            if (!bh)
-                return i;
+            return -EIO;
         }
+
+        // Copy data from user space buffer to block buffer
+        if (copy_from_user(bh->b_data + (offset % DEFAULT_BLOCK_SIZE), buf + bytes_written, bytes_to_write))
+        {
+            brelse(bh);
+            return -EFAULT;
+        }
+
+        mark_buffer_dirty(bh);
+        brelse(bh);
+
+        bytes_written += bytes_to_write;
+        offset += bytes_to_write;
     }
 
-    mark_buffer_dirty(bh);
-    brelse(bh);
-
-    return i;
+    return bytes_written;
 }
 
 struct dentry *logfilefs_lookup(struct inode *parent_inode, struct dentry *child_dentry, unsigned int flags)

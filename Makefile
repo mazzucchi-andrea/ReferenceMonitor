@@ -1,5 +1,5 @@
 obj-m += the_reference_monitor.o
-the_reference_monitor-objs += reference_monitor.o lib/scth.o logfilefs_src.o file.o dir.o
+the_reference_monitor-objs += reference_monitor.o lib/scth.o file.o dir.o
 
 A = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
 B = the_password
@@ -12,6 +12,7 @@ clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 	rm -r mount
 	rm image
+	rm logfilemakefs
 
 load:
 	insmod the_reference_monitor.ko the_syscall_table=$(A) the_password=$(B)
@@ -26,3 +27,6 @@ create-fs:
 	
 mount-fs:
 	mount -o loop -t logfilefs image ./mount/
+
+unmount-fs:
+	umount ./mount/

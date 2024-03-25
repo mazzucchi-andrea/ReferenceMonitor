@@ -4,8 +4,6 @@
 #include <linux/types.h>
 #include <linux/fs.h>
 
-#define MODNAME "REFERENCE_MONITOR"
-
 #define MAGIC 0x42424242
 #define DEFAULT_BLOCK_SIZE 4096
 #define SB_BLOCK_NUMBER 0
@@ -53,11 +51,6 @@ struct logfilefs_sb_info
 	// padding to fit into a single block
 	char padding[(4 * 1024) - (5 * sizeof(uint64_t))];
 };
-
-// logfilefs_src.c
-extern int logfilefs_fill_super(struct super_block *sb, void *data, int silent);
-extern void logfilefs_kill_superblock(struct super_block *s);
-extern struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data);
 
 // file.c
 extern const struct inode_operations logfilefs_inode_ops;

@@ -1,10 +1,8 @@
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/fs.h>
 #include <linux/timekeeping.h>
 #include <linux/time.h>
 #include <linux/buffer_head.h>
-#include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/minmax.h>
@@ -80,7 +78,7 @@ ssize_t logfilefs_write(struct file *filp, const char __user *buf, size_t len, l
 
     printk("%s: write operation called with len %ld", MODNAME, len);
 
-    if (file_size == maxbytes) 
+    if (file_size == maxbytes)
         return -ENOSPC; // fs full
 
     if (file_size + len > maxbytes)
@@ -110,6 +108,8 @@ ssize_t logfilefs_write(struct file *filp, const char __user *buf, size_t len, l
         bytes_written += bytes_to_write;
         offset += bytes_to_write;
     }
+
+    the_inode->i_size += bytes_written;
 
     return bytes_written;
 }

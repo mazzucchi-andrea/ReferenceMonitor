@@ -1,11 +1,9 @@
 #define EXPORT_SYMTAB
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/errno.h>
 #include <linux/device.h>
-#include <linux/kprobes.h>
 #include <linux/namei.h>
 #include <linux/mm.h>
 #include <linux/path.h>
@@ -19,8 +17,17 @@
 #include <linux/list.h>
 #include <linux/cred.h>
 #include <crypto/hash.h>
+#include <linux/init.h>
+#include <linux/timekeeping.h>
+#include <linux/time.h>
+#include <linux/buffer_head.h>
+#include <linux/blk_types.h>
+#include <linux/blkdev.h>
+#include <linux/genhd.h>
 
 #include "lib/include/scth.h"
+#include "reference_monitor.h"
+#include "hooks.h"
 #include "logfilefs.h"
 
 MODULE_LICENSE("GPL");
@@ -209,6 +216,18 @@ int remove_path(const char *path_to_remove)
         return -1;
 }
 
+int check_path(char *path)
+{
+        struct path_entry *entry;
+        list_for_each_entry(entry, &paths, list)
+        {
+                if (strcmp(entry->path, path) == 0)
+                        return -1;
+        }
+        printk("%s: Path '%s' not found in the list.\n", MODNAME, path);
+        return 0;
+}
+
 void print_paths(void)
 {
         struct path_entry *entry;
@@ -236,13 +255,8 @@ void cleanup_list(void)
         }
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 __SYSCALL_DEFINEx(2, _change_state, char *, password, int, state)
 {
-#else
-asmlinkage long sys_change_state(char *password, int state)
-{
-#endif
         printk("%s: _change_state called.\n", MODNAME);
 
         if (check_root() < 0)
@@ -274,13 +288,8 @@ asmlinkage long sys_change_state(char *password, int state)
         return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 __SYSCALL_DEFINEx(3, _edit_path, char *, password, char *, path, int, mode)
 {
-#else
-asmlinkage long sys_edit_path(char *password, char *path, int mode)
-{
-#endif
         struct path path_struct;
 
         printk("%s: _edit_path called.\n", MODNAME);
@@ -325,13 +334,8 @@ asmlinkage long sys_edit_path(char *password, char *path, int mode)
         return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 __SYSCALL_DEFINEx(2, _change_password, char *, old_password, char *, new_password)
 {
-#else
-asmlinkage long sys_change_password(char *old_password, char *new_password)
-{
-#endif
         int ret;
         u8 new_digest[SHA256_DIGEST_SIZE];
 
@@ -368,12 +372,113 @@ asmlinkage long sys_change_password(char *old_password, char *new_password)
         return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 long sys_change_state = (unsigned long)__x64_sys_change_state;
 long sys_edit_path = (unsigned long)__x64_sys_edit_path;
 long sys_change_password = (unsigned long)__x64_sys_change_password;
-#else
-#endif
+
+static struct super_operations logfilefs_super_ops = {};
+
+static struct dentry_operations logfilefs_dentry_ops = {};
+
+int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
+{
+        struct inode *root_inode;
+        struct buffer_head *bh;
+        struct logfilefs_sb_info *sb_disk;
+        struct timespec64 curr_time;
+        uint64_t magic;
+        long long int data_blocks;
+        loff_t maxbytes;
+
+        // Unique identifier of the filesystem
+        sb->s_magic = MAGIC;
+
+        bh = sb_bread(sb, SB_BLOCK_NUMBER);
+        if (!sb)
+        {
+                printk(KERN_ERR "%s: logfilefs super_block read failed.\n", MODNAME);
+                return -EIO;
+        }
+        sb_disk = (struct logfilefs_sb_info *)bh->b_data;
+        magic = sb_disk->magic;
+        brelse(bh);
+
+        // check on the expected magic number
+        if (magic != sb->s_magic)
+        {
+                printk(KERN_ERR "%s: logfilefs wrong magic number.\n", MODNAME);
+                return -EBADF;
+        }
+
+        sb->s_fs_info = NULL;            // FS specific data (the magic number) already reported into the generic superblock
+        sb->s_op = &logfilefs_super_ops; // set our own operations
+
+        data_blocks = (long long int)(get_capacity(sb->s_bdev->bd_disk) * bdev_logical_block_size(sb->s_bdev) / DEFAULT_BLOCK_SIZE) - 2;
+        pr_info("%s: logfilefs data blocks number %lld.\n", MODNAME, data_blocks);
+
+        maxbytes = data_blocks * DEFAULT_BLOCK_SIZE;
+        sb->s_maxbytes = maxbytes;
+        pr_info("%s: logfilefs maxbytes %lld.\n", MODNAME, maxbytes);
+
+        root_inode = iget_locked(sb, LOGFILEFS_ROOT_INODE_NUMBER); // get a root inode from cache
+        if (!root_inode)
+        {
+                printk(KERN_ERR "%s: logfilefs can not get root_inode.\n", MODNAME);
+                return -ENOMEM;
+        }
+
+        inode_init_owner(sb->s_user_ns, root_inode, NULL, S_IFDIR); // set the root user as owner of the FS root
+        root_inode->i_sb = sb;
+        root_inode->i_op = &logfilefs_inode_ops;       // set our inode operations
+        root_inode->i_fop = &logfilefs_dir_operations; // set our file operations
+                                                       // update access permission
+        root_inode->i_mode = S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IXUSR | S_IXGRP | S_IXOTH;
+
+        // baseline alignment of the FS timestamp to the current time
+        ktime_get_real_ts64(&curr_time);
+        root_inode->i_atime = root_inode->i_mtime = root_inode->i_ctime = curr_time;
+
+        // no inode from device is needed - the root of our file system is an in memory object
+        root_inode->i_private = NULL;
+
+        sb->s_root = d_make_root(root_inode);
+        if (!sb->s_root)
+        {
+                printk(KERN_ERR "%s: logfilefs d_make_root failed.\n", MODNAME);
+                return -ENOMEM;
+        }
+
+        sb->s_root->d_op = &logfilefs_dentry_ops; // set our dentry operations
+
+        // sb->s_maxbytes = (loff_t)(get_capacity(sb->s_bdev->bd_disk) * DEFAULT_BLOCK_SIZE);
+
+        // unlock the inode to make it usable
+        unlock_new_inode(root_inode);
+
+        return 0;
+}
+
+static void logfilefs_kill_superblock(struct super_block *s)
+{
+        kill_block_super(s);
+        printk(KERN_INFO "%s: logfilefs unmount succesful.\n", MODNAME);
+        return;
+}
+
+// called on file system mounting
+struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data)
+{
+        struct dentry *ret;
+
+        ret = mount_bdev(fs_type, flags, dev_name, data, logfilefs_fill_super);
+
+        if (unlikely(IS_ERR(ret)))
+                printk("%s: error mounting logfilefs", MODNAME);
+        else
+                printk("%s: logfilefs is succesfully mounted on from device %s\n", MODNAME, dev_name);
+
+        return ret;
+}
 
 // file system structure
 static struct file_system_type logfilefs_type = {
@@ -383,10 +488,18 @@ static struct file_system_type logfilefs_type = {
     .kill_sb = logfilefs_kill_superblock,
 };
 
+// kretprobes
+// static struct kretprobe unlink_kretprobe;
 
 int init_module(void)
 {
         int i, ret;
+
+        if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0))
+        {
+                printk("%s: unsupported kernel version", MODNAME);
+                return -1;
+        };
 
         if (the_syscall_table == 0x0)
         {
@@ -443,18 +556,41 @@ int init_module(void)
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
-                printk("%s: sucessfully registered singlefilefs\n", MODNAME);
+                printk("%s: sucessfully registered logfilefs\n", MODNAME);
         else
-                printk("%s: failed to register singlefilefs - error %d", MODNAME, ret);
+        {
+                printk("%s: failed to register logfilefs - error %d", MODNAME, ret);
+                return -1;
+        }
+
+        // register hooks
+        /*         ret = register_hook(unlink_kretprobe, unlink, (kretprobe_handler_t)the_pre_unlink_hook);
+                if (likely(ret == 0))
+                        printk("%s: sucessfully registered unlink kretprobe\n", MODNAME);
+                else
+                {
+                        printk("%s: failed to register unlink kretprobe - error %d\n", MODNAME, ret);
+                        return -1;
+                } */
 
         return 0;
 }
 
 void cleanup_module(void)
 {
-        int i;
+        int i, ret;
 
         printk("%s: shutting down\n", MODNAME);
+
+        cleanup_list();
+
+        // unregister filesystem
+        ret = unregister_filesystem(&logfilefs_type);
+
+        if (likely(ret == 0))
+                pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
+        else
+                pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
 
         unprotect_memory();
         for (i = 0; i < HACKED_ENTRIES; i++)
@@ -464,6 +600,4 @@ void cleanup_module(void)
         protect_memory();
 
         printk("%s: sys-call table restored to its original content\n", MODNAME);
-
-        cleanup_list();
 }

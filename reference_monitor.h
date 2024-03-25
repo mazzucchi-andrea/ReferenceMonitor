@@ -1,0 +1,7 @@
+#ifndef REFERENCE_MONITOR_H
+#define REFERENCE_MONITOR_H
+
+#define MODNAME "REFERENCE_MONITOR"
+
+#endif
+

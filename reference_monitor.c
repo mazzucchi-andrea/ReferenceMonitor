@@ -14,7 +14,6 @@
 #include <linux/syscalls.h>
 #include <linux/crypto.h>
 #include <linux/slab.h>
-#include <linux/list.h>
 #include <linux/cred.h>
 #include <crypto/hash.h>
 #include <linux/init.h>
@@ -24,11 +23,13 @@
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/genhd.h>
+#include <linux/fs.h>
 
 #include "lib/include/scth.h"
 #include "reference_monitor.h"
 #include "hooks.h"
 #include "logfilefs.h"
+#include "path_list.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
@@ -102,11 +103,11 @@ int check_password(char *password)
 {
         u8 digest[SHA256_DIGEST_SIZE];
 
-        // check old_password length
         if (check_password_length(password) < 0)
         {
                 return -1;
         }
+
         if (hash_password(password, strlen(password), digest) < 0)
         {
                 return -1;
@@ -114,6 +115,7 @@ int check_password(char *password)
 
         if (memcmp(digest_password, digest, SHA256_DIGEST_SIZE) != 0)
                 return -1;
+
         return 0;
 }
 
@@ -124,13 +126,6 @@ int check_root(void)
                 return -1;
         return 0;
 }
-
-#define AUDIT if (1)
-
-#define ON 0
-#define OFF 1
-#define REC_ON 2
-#define REC_OFF 3
 
 int monitor_state = ON;
 
@@ -165,98 +160,12 @@ int check_rec_state(void)
 #define ADD 0
 #define REMOVE 1
 
-struct path_entry
+__SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 {
-        struct list_head list;
-        char *path;
-};
+        int ret;
+        long copied;
+        char passwd_buf[PASSWORD_MAX_LEN + 1];
 
-LIST_HEAD(paths);
-
-int add_path(const char *new_path)
-{
-        struct path_entry *new_path_entry = kmalloc(sizeof(struct path_entry), GFP_KERNEL);
-        if (new_path_entry == NULL)
-        {
-                printk("%s: Memory allocation failed\n", MODNAME);
-                return -1;
-        }
-
-        new_path_entry->path = kmalloc(strlen(new_path), GFP_KERNEL);
-        if (new_path_entry->path == NULL)
-        {
-                printk("%s: Memory allocation failed\n", MODNAME);
-                kfree(new_path_entry->path);
-                kfree(new_path_entry);
-                return -1;
-        }
-        strcpy(new_path_entry->path, new_path);
-
-        INIT_LIST_HEAD(&new_path_entry->list);
-
-        list_add_tail(&new_path_entry->list, &paths);
-        return 0;
-}
-
-int remove_path(const char *path_to_remove)
-{
-        struct path_entry *entry, *tmp;
-        list_for_each_entry_safe(entry, tmp, &paths, list)
-        {
-                if (strcmp(entry->path, path_to_remove) == 0)
-                {
-                        list_del(&entry->list);
-                        kfree(entry->path);
-                        kfree(entry);
-                        printk("%s: Path '%s' removed.\n", MODNAME, path_to_remove);
-                        return 0;
-                }
-        }
-        printk("%s: Path '%s' not found in the list.\n", MODNAME, path_to_remove);
-        return -1;
-}
-
-int check_path(char *path)
-{
-        struct path_entry *entry;
-        list_for_each_entry(entry, &paths, list)
-        {
-                if (strcmp(entry->path, path) == 0)
-                        return -1;
-        }
-        printk("%s: Path '%s' not found in the list.\n", MODNAME, path);
-        return 0;
-}
-
-void print_paths(void)
-{
-        struct path_entry *entry;
-
-        printk("%s: Paths:\n", MODNAME);
-
-        // Iterate over each entry in the list
-        list_for_each_entry(entry, &paths, list)
-        {
-                printk("%s: %s\n", MODNAME, entry->path);
-        }
-}
-
-void cleanup_list(void)
-{
-        struct path_entry *entry, *tmp;
-
-        list_for_each_entry_safe(entry, tmp, &paths, list)
-        {
-                list_del(&entry->list);
-
-                kfree(entry->path);
-
-                kfree(entry);
-        }
-}
-
-__SYSCALL_DEFINEx(2, _change_state, char *, password, int, state)
-{
         printk("%s: _change_state called.\n", MODNAME);
 
         if (check_root() < 0)
@@ -265,7 +174,13 @@ __SYSCALL_DEFINEx(2, _change_state, char *, password, int, state)
                 return -1;
         }
 
-        if (check_password(password) < 0)
+        copied = strncpy_from_user(passwd_buf, password, sizeof(passwd_buf));
+        if (copied < 0 || copied == sizeof(passwd_buf))
+        {
+                return -EFAULT;
+        }
+
+        if (check_password(passwd_buf) < 0)
         {
                 printk("%s: invalid password.\n", MODNAME);
                 return -1;
@@ -279,6 +194,17 @@ __SYSCALL_DEFINEx(2, _change_state, char *, password, int, state)
                 return -1;
         }
 
+        if (state == ON || state == REC_ON)
+        {
+                ret = enable_hooks();
+                if (ret != 0)
+                        return ret;
+        } else {
+                ret = disable_hooks();
+                if (ret != 0)
+                        return ret;
+        }
+
         monitor_state = state;
 
         printk("%s: state changed.\n", MODNAME);
@@ -288,9 +214,13 @@ __SYSCALL_DEFINEx(2, _change_state, char *, password, int, state)
         return 0;
 }
 
-__SYSCALL_DEFINEx(3, _edit_path, char *, password, char *, path, int, mode)
+__SYSCALL_DEFINEx(3, _edit_path, const char __user *, password, const char __user *, path, int, mode)
 {
         struct path path_struct;
+        long copied;
+        int ret;
+        char passwd_buf[PASSWORD_MAX_LEN + 1];
+        char *path_buf;
 
         printk("%s: _edit_path called.\n", MODNAME);
 
@@ -300,7 +230,20 @@ __SYSCALL_DEFINEx(3, _edit_path, char *, password, char *, path, int, mode)
                 return -1;
         }
 
-        if (check_password(password) < 0)
+        if (mode != ADD && mode != REMOVE)
+        {
+                printk("%s: invalid mode\n", MODNAME);
+                return -1;
+        }
+
+        copied = strncpy_from_user(passwd_buf, password, sizeof(passwd_buf));
+        if (copied < 0 || copied == sizeof(passwd_buf))
+        {
+                printk("%s: failing copy password from user\n", MODNAME);
+                return -EFAULT;
+        }
+
+        if (check_password(passwd_buf) < 0)
         {
                 printk("%s: invalid password.\n", MODNAME);
                 return -1;
@@ -312,21 +255,37 @@ __SYSCALL_DEFINEx(3, _edit_path, char *, password, char *, path, int, mode)
                 return -1;
         }
 
-        if (kern_path(path, LOOKUP_FOLLOW, &path_struct) < 0)
+        path_buf = (char *)kmalloc((PATH_MAX_LEN + 1), GFP_KERNEL);
+        if (!path_buf)
+        {
+                printk("%s: kmalloc failing for path buffer\n", MODNAME);
+                return -ENOMEM;
+        }
+
+        copied = strncpy_from_user(path_buf, path, (PATH_MAX_LEN + 1));
+        if (copied < 0 || copied == sizeof(path_buf))
+        {
+                printk("%s: failing copy path from user\n", MODNAME);
+                kfree(path_buf);
+                return -EFAULT;
+        }
+
+        if (kern_path(path_buf, LOOKUP_FOLLOW, &path_struct) < 0)
         {
                 printk("%s: Error resolving path.\n", MODNAME);
+                kfree(path_buf);
                 return -1;
         }
 
         if (mode == ADD)
+                ret = add_path(path_buf);
+        else
+                ret = remove_path(path_buf);
+
+        if (ret < 0)
         {
-                if (add_path(path) < 0)
-                        return -1;
-        }
-        else if (mode == REMOVE)
-        {
-                if (remove_path(path) < 0)
-                        return -1;
+                kfree(path_buf);
+                return ret;
         }
 
         print_paths();
@@ -334,41 +293,56 @@ __SYSCALL_DEFINEx(3, _edit_path, char *, password, char *, path, int, mode)
         return 0;
 }
 
-__SYSCALL_DEFINEx(2, _change_password, char *, old_password, char *, new_password)
+__SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const char __user *, new_password)
 {
         int ret;
+        long copied;
         u8 new_digest[SHA256_DIGEST_SIZE];
+        char old_passwd_buf[PASSWORD_MAX_LEN + 1];
+        char new_passwd_buf[PASSWORD_MAX_LEN + 1];
 
-        printk("%s: _change_password called.\n", MODNAME);
+        printk("%s: _change_password called\n", MODNAME);
 
         if (check_root() < 0)
         {
-                printk("%s: only root can change the monitor password.\n", MODNAME);
+                printk("%s: only root can change the monitor password\n", MODNAME);
                 return -1;
         }
 
-        if (check_password(old_password) < 0)
+        copied = strncpy_from_user(old_passwd_buf, old_password, sizeof(old_passwd_buf));
+        if (copied < 0 || copied == sizeof(old_passwd_buf))
+        {
+                return -EFAULT;
+        }
+
+        copied = strncpy_from_user(new_passwd_buf, new_password, sizeof(new_passwd_buf));
+        if (copied < 0 || copied == sizeof(new_passwd_buf))
+        {
+                return -EFAULT;
+        }
+
+        if (check_password(old_passwd_buf) < 0)
         {
                 printk("%s: invalid password.\n", MODNAME);
                 return -1;
         }
 
-        if (check_password_length(new_password) < 0)
+        if (check_password_length(new_passwd_buf) < 0)
         {
-                printk("%s: invalid new password length.\n", MODNAME);
+                printk("%s: invalid new password length\n", MODNAME);
                 return -1;
         }
 
-        ret = hash_password(new_password, strlen(new_password), new_digest);
+        ret = hash_password(new_passwd_buf, strlen(new_passwd_buf), new_digest);
         if (ret < 0)
         {
-                printk("%s: failing hashing new password.\n", MODNAME);
+                printk("%s: failing hashing new password\n", MODNAME);
                 return ret;
         }
 
         memcpy(digest_password, new_digest, HASH_LEN);
 
-        printk("%s: password changed.\n", MODNAME);
+        printk("%s: password changed\n", MODNAME);
         return 0;
 }
 
@@ -488,9 +462,6 @@ static struct file_system_type logfilefs_type = {
     .kill_sb = logfilefs_kill_superblock,
 };
 
-// kretprobes
-// static struct kretprobe unlink_kretprobe;
-
 int init_module(void)
 {
         int i, ret;
@@ -551,7 +522,13 @@ int init_module(void)
 
         protect_memory();
 
-        printk("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
+        AUDIT
+        {
+                printk("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
+                printk("%s: %s is at table entry %d\n", MODNAME, "_change_state", restore[0]);
+                printk("%s: %s is at table entry %d\n", MODNAME, "_edit_path", restore[1]);
+                printk("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
+        }
 
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
@@ -563,17 +540,10 @@ int init_module(void)
                 return -1;
         }
 
-        // register hooks
-        /*         ret = register_hook(unlink_kretprobe, unlink, (kretprobe_handler_t)the_pre_unlink_hook);
-                if (likely(ret == 0))
-                        printk("%s: sucessfully registered unlink kretprobe\n", MODNAME);
-                else
-                {
-                        printk("%s: failed to register unlink kretprobe - error %d\n", MODNAME, ret);
-                        return -1;
-                } */
+        //register hooks
+        ret = register_hooks();      
 
-        return 0;
+        return ret;
 }
 
 void cleanup_module(void)
@@ -586,11 +556,12 @@ void cleanup_module(void)
 
         // unregister filesystem
         ret = unregister_filesystem(&logfilefs_type);
-
         if (likely(ret == 0))
-                pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
+                printk("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
         else
-                pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
+                printk("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
+
+        unregister_hooks();
 
         unprotect_memory();
         for (i = 0; i < HACKED_ENTRIES; i++)

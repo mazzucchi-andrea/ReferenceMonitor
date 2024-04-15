@@ -6,6 +6,7 @@
         "stdlib.h": "c",
         "memory_resource": "c",
         "random": "c",
-        "logfilefs.h": "c"
+        "logfilefs.h": "c",
+        "charconv": "c"
     }
 }

@@ -8,5 +8,6 @@
         "random": "c",
         "logfilefs.h": "c",
         "charconv": "c"
-    }
+    },
+    "C_Cpp.default.compilerPath": "/usr/bin/clang"
 }

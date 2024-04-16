@@ -54,3 +54,6 @@ dkms.conf
 image
 logfilemakefs
 mount
+user/main
+user/test
+user/test_no_root

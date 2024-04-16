@@ -18,10 +18,11 @@
 #define ADD 0
 #define REMOVE 1
 
+char *saved_password = "the_password";
+
 void change_state()
 {
     int state, ret;
-    char password[PASSWORD_MAX_LEN + 1];
 
     printf("Select one of the folliwing states:\n");
     printf("ON: %d\n", ON);
@@ -38,10 +39,7 @@ void change_state()
         return;
     }
 
-    printf("Enter your password (up to %d characters): ", PASSWORD_MAX_LEN);
-    scanf("%64s", password);
-
-    ret = syscall(156, password, state);
+    ret = syscall(156, saved_password, state);
     if (ret < 0)
     {
         printf("change_state failed with error %d\n", ret);
@@ -54,8 +52,7 @@ void change_state()
 void edit_path()
 {
     int mode, ret;
-    char password[PASSWORD_MAX_LEN + 1];
-    char path[PATH_MAX_LEN + 1];
+    char path[PATH_MAX_LEN];
 
     printf("Select one of the folliwing modes:\n");
     printf("ADD: %d\n", ADD);
@@ -70,13 +67,10 @@ void edit_path()
         return;
     }
 
-    printf("Enter your password (up to %d characters): ", PASSWORD_MAX_LEN);
-    scanf("%64s", password);
+    printf("Enter the path (up to %d characters): ", PATH_MAX_LEN - 1);
+    scanf("%4095s", path);
 
-    printf("Enter the path (up to %d characters): ", PATH_MAX_LEN);
-    scanf("%4096s", path);
-
-    ret = syscall(174, password, path, mode);
+    ret = syscall(174, saved_password, path, mode);
     if (ret < 0)
     {
         printf("edit_path failed with error %d\n", ret);
@@ -90,20 +84,18 @@ void change_password()
 {
     int ret;
     char new_password[PASSWORD_MAX_LEN + 1];
-    char password[PASSWORD_MAX_LEN + 1];
-
-    printf("Enter your password (up to %d characters): ", PASSWORD_MAX_LEN);
-    scanf("%64s", password);
 
     printf("Enter the new password (up to %d characters): ", PASSWORD_MAX_LEN);
     scanf("%64s", new_password);
 
-    ret = syscall(177, password, new_password);
+    ret = syscall(177, saved_password, new_password);
     if (ret < 0)
     {
         printf("change_password failed with error %d\n", ret);
         return;
     }
+
+    saved_password = new_password;
 
     printf("Password Changed\n");
 }

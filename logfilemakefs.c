@@ -21,11 +21,11 @@ int main(int argc, char *argv[])
 	int fd, nbytes;
 	ssize_t ret;
 	struct logfilefs_sb_info sb;
-	struct logfilefs_inode root_inode;
-	struct logfilefs_inode file_inode;
+	logfilefs_inode root_inode;
+	logfilefs_inode file_inode;
 	struct logfilefs_dir_record record;
 	char *block_padding;
-	char *file_body = "Reference Monitor log file.\n"; // this is the default content of the unique file
+	char *file_body = "Reference Monitor log file\n"; // this is the default content of the unique file
 
 	if (argc != 2)
 	{

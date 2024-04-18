@@ -19,7 +19,7 @@
 #define UNIQUE_FILE_NAME "the-log"
 
 // inode definition
-struct logfilefs_inode
+typedef struct _logfilefs_inode
 {
 	mode_t mode; // not exploited
 	uint64_t inode_no;
@@ -30,7 +30,7 @@ struct logfilefs_inode
 		uint64_t file_size;
 		uint64_t dir_children_count;
 	};
-};
+} logfilefs_inode;
 
 // dir definition (how the dir datablock is organized)
 struct logfilefs_dir_record

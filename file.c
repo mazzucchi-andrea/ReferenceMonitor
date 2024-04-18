@@ -1,29 +1,8 @@
-#include <linux/init.h>
-#include <linux/module.h>
-#include <linux/timekeeping.h>
-#include <linux/time.h>
-#include <linux/buffer_head.h>
-#include <linux/slab.h>
-#include <linux/string.h>
-#include <linux/minmax.h>
-
 #include "logfilefs.h"
 #include "reference_monitor.h"
 
-int logfilefs_open(struct inode *inode, struct file *filp)
-{
-    loff_t file_size = inode->i_size;
-
-    filp->f_pos = 0;
-
-    printk("%s: open operation called (the current file size is %lld)", MODNAME, file_size);
-
-    return 0;
-}
-
 ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *off)
 {
-
     struct buffer_head *bh = NULL;
     struct inode *the_inode = filp->f_inode;
     uint64_t file_size = the_inode->i_size;
@@ -31,7 +10,7 @@ ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *
     loff_t offset;
     int block_to_read; // index of the block to be read from device
 
-    printk("%s: read operation called with len %ld - and offset %lld (the current file size is %lld)", MODNAME, len, *off, file_size);
+    pr_info("%s: read operation called with len %ld - and offset %lld (the current file size is %lld)", MODNAME, len, *off, file_size);
 
     // this operation is not synchronized
     //*off can be changed concurrently
@@ -52,7 +31,7 @@ ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *
     // compute the actual index of the the block to be read from device
     block_to_read = *off / DEFAULT_BLOCK_SIZE + 2; // the value 2 accounts for superblock and file-inode on device
 
-    printk("%s: read operation must access block %d of the device", MODNAME, block_to_read);
+    pr_info("%s: read operation must access block %d of the device", MODNAME, block_to_read);
 
     bh = (struct buffer_head *)sb_bread(filp->f_path.dentry->d_inode->i_sb, block_to_read);
     if (!bh)
@@ -66,75 +45,30 @@ ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *
     return len - ret;
 }
 
-ssize_t logfilefs_write(struct file *filp, const char __user *buf, size_t len, loff_t *off)
-{
-    struct buffer_head *bh = NULL;
-    struct inode *the_inode = filp->f_inode;
-    uint64_t file_size = the_inode->i_size;
-    loff_t maxbytes = the_inode->i_sb->s_maxbytes;
-    ssize_t bytes_written = 0;
-    loff_t offset = file_size; // with this offset every write is an append operation
-    int block_to_write;
-
-    printk("%s: write operation called with len %ld", MODNAME, len);
-
-    if (file_size == maxbytes)
-        return -ENOSPC; // fs full
-
-    if (file_size + len > maxbytes)
-        len = maxbytes - file_size; // can't write all the bytes
-
-    while (bytes_written < len)
-    {
-        int bytes_to_write = min(len - bytes_written, (size_t)(DEFAULT_BLOCK_SIZE - (offset % DEFAULT_BLOCK_SIZE)));
-        block_to_write = offset / DEFAULT_BLOCK_SIZE + 2;
-
-        bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, block_to_write);
-        if (!bh)
-        {
-            return -EIO;
-        }
-
-        // Copy data from user space buffer to block buffer
-        if (copy_from_user(bh->b_data + (offset % DEFAULT_BLOCK_SIZE), buf + bytes_written, bytes_to_write))
-        {
-            brelse(bh);
-            return -EFAULT;
-        }
-
-        mark_buffer_dirty(bh);
-        brelse(bh);
-
-        bytes_written += bytes_to_write;
-        offset += bytes_to_write;
-    }
-
-    the_inode->i_size += bytes_written;
-
-    return bytes_written;
-}
-
 struct dentry *logfilefs_lookup(struct inode *parent_inode, struct dentry *child_dentry, unsigned int flags)
 {
-
-    struct logfilefs_inode *FS_specific_inode;
+    logfilefs_inode *FS_specific_inode;
     struct super_block *sb = parent_inode->i_sb;
     struct buffer_head *bh = NULL;
     struct inode *the_inode = NULL;
 
-    printk("%s: running the lookup inode-function for name %s", MODNAME, child_dentry->d_name.name);
+    pr_info("%s: running the lookup inode-function for name %s", MODNAME, child_dentry->d_name.name);
 
     if (!strcmp(child_dentry->d_name.name, UNIQUE_FILE_NAME))
     {
-
         // get a locked inode from the cache
-        the_inode = iget_locked(sb, 1);
+        the_inode = iget_locked(sb, LOGFILEFS_FILE_INODE_NUMBER);
         if (!the_inode)
             return ERR_PTR(-ENOMEM);
 
         // already cached inode - simply return successfully
         if (!(the_inode->i_state & I_NEW))
         {
+            if (hlist_empty(&the_inode->i_dentry)){
+                d_add(child_dentry, the_inode);
+                dget(child_dentry);
+            }
+            inode_unlock(the_inode);
             return child_dentry;
         }
 
@@ -154,7 +88,7 @@ struct dentry *logfilefs_lookup(struct inode *parent_inode, struct dentry *child
             iput(the_inode);
             return ERR_PTR(-EIO);
         }
-        FS_specific_inode = (struct logfilefs_inode *)bh->b_data;
+        FS_specific_inode = (logfilefs_inode *)bh->b_data;
         the_inode->i_size = FS_specific_inode->file_size;
         brelse(bh);
 
@@ -178,4 +112,4 @@ const struct inode_operations logfilefs_inode_ops = {
 const struct file_operations logfilefs_file_operations = {
     .owner = THIS_MODULE,
     .read = logfilefs_read,
-    .write = logfilefs_write};
+};

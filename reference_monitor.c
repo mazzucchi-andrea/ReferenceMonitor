@@ -4,26 +4,21 @@
 #include <linux/cdev.h>
 #include <linux/errno.h>
 #include <linux/device.h>
-#include <linux/namei.h>
 #include <linux/mm.h>
 #include <linux/path.h>
 #include <linux/sched.h>
 #include <linux/version.h>
-#include <linux/string.h>
 #include <linux/vmalloc.h>
 #include <linux/syscalls.h>
-#include <linux/crypto.h>
-#include <linux/slab.h>
 #include <linux/cred.h>
-#include <crypto/hash.h>
 #include <linux/init.h>
 #include <linux/timekeeping.h>
 #include <linux/time.h>
-#include <linux/buffer_head.h>
+#include <linux/minmax.h>
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/genhd.h>
-#include <linux/fs.h>
+#include <linux/mutex.h>
 
 #include "lib/include/scth.h"
 #include "reference_monitor.h"
@@ -31,19 +26,20 @@
 #include "logfilefs.h"
 #include "path_list.h"
 
+#define PASSWORD_MAX_LEN 64
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
 
 unsigned long the_syscall_table = 0x0;
 module_param(the_syscall_table, ulong, 0660);
 
-#define SHA256_DIGEST_SIZE 256
-#define PASSWORD_MAX_LEN 64
-#define HASH_LEN SHA256_DIGEST_SIZE
-
 u8 digest_password[SHA256_DIGEST_SIZE];
 char *the_password;
 module_param(the_password, charp, 0);
+
+struct super_block *device_sb;
+DEFINE_MUTEX(device_mutex);
 
 unsigned long the_ni_syscall;
 unsigned long new_sys_call_array[] = {0x0, 0x0, 0x0};
@@ -55,12 +51,12 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
         struct crypto_shash *tfm;
         struct shash_desc *desc;
         int ret = -ENOMEM;
-        unsigned char *digest;
+        u8 *digest;
 
         tfm = crypto_alloc_shash("sha256", 0, 0);
         if (IS_ERR(tfm))
         {
-                printk("%s: Unable to allocate crypto hash\n", MODNAME);
+                pr_err("%s: unable to allocate crypto hash\n", MODNAME);
                 return PTR_ERR(tfm);
         }
 
@@ -75,9 +71,9 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
                 goto out_free_desc;
 
         ret = crypto_shash_digest(desc, password, password_len, digest);
-        if (ret)
+        if (ret < 0)
         {
-                printk("%s: Error hashing password: %d\n", MODNAME, ret);
+                pr_err("%s: error hashing password with err %d\n", MODNAME, ret);
                 goto out_free_digest;
         }
 
@@ -127,23 +123,23 @@ int check_root(void)
         return 0;
 }
 
-int monitor_state = ON;
+int monitor_state = REC_ON;
 
 void print_current_monitor_state(void)
 {
         switch (monitor_state)
         {
         case ON:
-                printk("%s: current state is ON.\n", MODNAME);
+                pr_info("%s: current state is ON.\n", MODNAME);
                 break;
         case OFF:
-                printk("%s: current state is OFF.\n", MODNAME);
+                pr_info("%s: current state is OFF.\n", MODNAME);
                 break;
         case REC_ON:
-                printk("%s: current state is REC_ON.\n", MODNAME);
+                pr_info("%s: current state is REC_ON.\n", MODNAME);
                 break;
         case REC_OFF:
-                printk("%s: current state is REC_OFF.\n", MODNAME);
+                pr_info("%s: current state is REC_OFF.\n", MODNAME);
                 break;
         default:
                 break;
@@ -166,23 +162,23 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
         long copied;
         char passwd_buf[PASSWORD_MAX_LEN + 1];
 
-        printk("%s: _change_state called.\n", MODNAME);
+        pr_info("%s: _change_state called.\n", MODNAME);
 
         if (check_root() < 0)
         {
-                printk("%s: only root can change the monitor state.\n", MODNAME);
-                return -1;
+                pr_notice("%s: only root can change the monitor state.\n", MODNAME);
+                return -EPERM;
         }
 
         copied = strncpy_from_user(passwd_buf, password, sizeof(passwd_buf));
-        if (copied < 0 || copied == sizeof(passwd_buf))
+        if (copied < 0)
         {
                 return -EFAULT;
         }
 
         if (check_password(passwd_buf) < 0)
         {
-                printk("%s: invalid password.\n", MODNAME);
+                pr_notice("%s: invalid password.\n", MODNAME);
                 return -1;
         }
 
@@ -190,31 +186,33 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 
         if (state < 0 || state > 3)
         {
-                printk("%s: invalid state %d.\n", MODNAME, state);
+                pr_notice("%s: invalid state %d.\n", MODNAME, state);
                 return -1;
         }
 
         if (state == ON || state == REC_ON)
         {
                 ret = enable_hooks();
-                if (ret != 0)
+                if (unlikely(ret != 0))
                         return ret;
-        } else {
+        }
+        else
+        {
                 ret = disable_hooks();
-                if (ret != 0)
+                if (unlikely(ret != 0))
                         return ret;
         }
 
         monitor_state = state;
 
-        printk("%s: state changed.\n", MODNAME);
+        pr_info("%s: state changed.\n", MODNAME);
 
         print_current_monitor_state();
 
         return 0;
 }
 
-__SYSCALL_DEFINEx(3, _edit_path, const char __user *, password, const char __user *, path, int, mode)
+__SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __user *, path, int, mode)
 {
         struct path path_struct;
         long copied;
@@ -222,57 +220,57 @@ __SYSCALL_DEFINEx(3, _edit_path, const char __user *, password, const char __use
         char passwd_buf[PASSWORD_MAX_LEN + 1];
         char *path_buf;
 
-        printk("%s: _edit_path called.\n", MODNAME);
+        pr_info("%s: _edit_paths called.\n", MODNAME);
 
         if (check_root() < 0)
         {
-                printk("%s: only root can edit the monitor paths.\n", MODNAME);
-                return -1;
+                pr_notice("%s: only root can edit the monitor paths.\n", MODNAME);
+                return -EPERM;
         }
 
         if (mode != ADD && mode != REMOVE)
         {
-                printk("%s: invalid mode\n", MODNAME);
+                pr_notice("%s: invalid mode\n", MODNAME);
                 return -1;
         }
 
         copied = strncpy_from_user(passwd_buf, password, sizeof(passwd_buf));
-        if (copied < 0 || copied == sizeof(passwd_buf))
+        if (copied < 0)
         {
-                printk("%s: failing copy password from user\n", MODNAME);
+                pr_err("%s: failing copy password from user\n", MODNAME);
                 return -EFAULT;
         }
 
         if (check_password(passwd_buf) < 0)
         {
-                printk("%s: invalid password.\n", MODNAME);
+                pr_notice("%s: invalid password.\n", MODNAME);
                 return -1;
         }
 
         if (check_rec_state() < 0)
         {
-                printk("%s: invalid monitor state.\n", MODNAME);
+                pr_notice("%s: invalid monitor state.\n", MODNAME);
                 return -1;
         }
 
-        path_buf = (char *)kmalloc((PATH_MAX_LEN + 1), GFP_KERNEL);
+        path_buf = (char *)kmalloc((PATH_MAX), GFP_KERNEL);
         if (!path_buf)
         {
-                printk("%s: kmalloc failing for path buffer\n", MODNAME);
+                pr_err("%s: kmalloc failing for path buffer\n", MODNAME);
                 return -ENOMEM;
         }
 
-        copied = strncpy_from_user(path_buf, path, (PATH_MAX_LEN + 1));
-        if (copied < 0 || copied == sizeof(path_buf))
+        copied = strncpy_from_user(path_buf, path, (PATH_MAX));
+        if (copied < 0)
         {
-                printk("%s: failing copy path from user\n", MODNAME);
+                pr_err("%s: failing copy path from user\n", MODNAME);
                 kfree(path_buf);
                 return -EFAULT;
         }
 
         if (kern_path(path_buf, LOOKUP_FOLLOW, &path_struct) < 0)
         {
-                printk("%s: Error resolving path.\n", MODNAME);
+                pr_notice("%s: cannot resolving path\n", MODNAME);
                 kfree(path_buf);
                 return -1;
         }
@@ -284,6 +282,7 @@ __SYSCALL_DEFINEx(3, _edit_path, const char __user *, password, const char __use
 
         if (ret < 0)
         {
+                pr_err("%s: error edit path list\n", MODNAME);
                 kfree(path_buf);
                 return ret;
         }
@@ -301,53 +300,53 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
         char old_passwd_buf[PASSWORD_MAX_LEN + 1];
         char new_passwd_buf[PASSWORD_MAX_LEN + 1];
 
-        printk("%s: _change_password called\n", MODNAME);
+        pr_info("%s: _change_password called\n", MODNAME);
 
         if (check_root() < 0)
         {
-                printk("%s: only root can change the monitor password\n", MODNAME);
-                return -1;
+                pr_notice("%s: only root can change the monitor password\n", MODNAME);
+                return -EPERM;
         }
 
         copied = strncpy_from_user(old_passwd_buf, old_password, sizeof(old_passwd_buf));
-        if (copied < 0 || copied == sizeof(old_passwd_buf))
+        if (copied < 0)
         {
                 return -EFAULT;
         }
 
         copied = strncpy_from_user(new_passwd_buf, new_password, sizeof(new_passwd_buf));
-        if (copied < 0 || copied == sizeof(new_passwd_buf))
+        if (copied < 0)
         {
                 return -EFAULT;
         }
 
         if (check_password(old_passwd_buf) < 0)
         {
-                printk("%s: invalid password.\n", MODNAME);
+                pr_notice("%s: invalid password.\n", MODNAME);
                 return -1;
         }
 
         if (check_password_length(new_passwd_buf) < 0)
         {
-                printk("%s: invalid new password length\n", MODNAME);
+                pr_notice("%s: invalid new password length\n", MODNAME);
                 return -1;
         }
 
         ret = hash_password(new_passwd_buf, strlen(new_passwd_buf), new_digest);
         if (ret < 0)
         {
-                printk("%s: failing hashing new password\n", MODNAME);
+                pr_err("%s: failing hashing new password\n", MODNAME);
                 return ret;
         }
 
-        memcpy(digest_password, new_digest, HASH_LEN);
+        memcpy(digest_password, new_digest, SHA256_DIGEST_SIZE);
 
-        printk("%s: password changed\n", MODNAME);
+        pr_info("%s: password changed\n", MODNAME);
         return 0;
 }
 
 long sys_change_state = (unsigned long)__x64_sys_change_state;
-long sys_edit_path = (unsigned long)__x64_sys_edit_path;
+long sys_edit_paths = (unsigned long)__x64_sys_edit_paths;
 long sys_change_password = (unsigned long)__x64_sys_change_password;
 
 static struct super_operations logfilefs_super_ops = {};
@@ -370,7 +369,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         bh = sb_bread(sb, SB_BLOCK_NUMBER);
         if (!sb)
         {
-                printk(KERN_ERR "%s: logfilefs super_block read failed.\n", MODNAME);
+                pr_err("%s: logfilefs super_block read failed.\n", MODNAME);
                 return -EIO;
         }
         sb_disk = (struct logfilefs_sb_info *)bh->b_data;
@@ -380,7 +379,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         // check on the expected magic number
         if (magic != sb->s_magic)
         {
-                printk(KERN_ERR "%s: logfilefs wrong magic number.\n", MODNAME);
+                pr_err("%s: logfilefs wrong magic number.\n", MODNAME);
                 return -EBADF;
         }
 
@@ -397,7 +396,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         root_inode = iget_locked(sb, LOGFILEFS_ROOT_INODE_NUMBER); // get a root inode from cache
         if (!root_inode)
         {
-                printk(KERN_ERR "%s: logfilefs can not get root_inode.\n", MODNAME);
+                pr_err("%s: logfilefs can not get root_inode.\n", MODNAME);
                 return -ENOMEM;
         }
 
@@ -418,39 +417,98 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         sb->s_root = d_make_root(root_inode);
         if (!sb->s_root)
         {
-                printk(KERN_ERR "%s: logfilefs d_make_root failed.\n", MODNAME);
+                pr_err("%s: logfilefs d_make_root failed.\n", MODNAME);
                 return -ENOMEM;
         }
 
         sb->s_root->d_op = &logfilefs_dentry_ops; // set our dentry operations
 
-        // sb->s_maxbytes = (loff_t)(get_capacity(sb->s_bdev->bd_disk) * DEFAULT_BLOCK_SIZE);
-
         // unlock the inode to make it usable
         unlock_new_inode(root_inode);
+
+        device_sb = sb;
 
         return 0;
 }
 
 static void logfilefs_kill_superblock(struct super_block *s)
 {
+        get_lock();
+
         kill_block_super(s);
-        printk(KERN_INFO "%s: logfilefs unmount succesful.\n", MODNAME);
+        pr_info("%s: logfilefs unmount succesful.\n", MODNAME);
+
+        release_lock();
+
         return;
+}
+
+
+int logfilefs_init_inode(void)
+{
+        struct buffer_head *bh;
+        struct inode *the_inode;
+        logfilefs_inode *FS_specific_inode;
+
+        the_inode = iget_locked(device_sb, LOGFILEFS_FILE_INODE_NUMBER);
+        if (!the_inode)
+                return -ENOMEM;
+
+        // already cached inode - simply return successfully
+        if (!(the_inode->i_state & I_NEW))
+                return 0;
+
+        // this work is done if the inode was not already cached
+        inode_init_owner(device_sb->s_user_ns, the_inode, NULL, S_IFREG);
+        the_inode->i_mode = S_IFREG | S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IXUSR | S_IXGRP | S_IXOTH;
+        the_inode->i_fop = &logfilefs_file_operations;
+        the_inode->i_op = &logfilefs_inode_ops;
+
+        // just one link for this file
+        set_nlink(the_inode, 1);
+
+        // now we retrieve the file size via the FS specific inode, putting it into the generic inode
+        bh = sb_bread(device_sb, LOGFILEFS_INODES_BLOCK_NUMBER);
+        if (!bh)
+        {
+                iput(the_inode);
+                return -EIO;
+        }
+        FS_specific_inode = (logfilefs_inode *)bh->b_data;
+        i_size_write(the_inode, FS_specific_inode->file_size);
+        brelse(bh);
+
+        // unlock the inode to make it usable
+        unlock_new_inode(the_inode);
+
+        return 0;
 }
 
 // called on file system mounting
 struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data)
 {
         struct dentry *ret;
+        int err;
+
+        get_lock();
 
         ret = mount_bdev(fs_type, flags, dev_name, data, logfilefs_fill_super);
 
         if (unlikely(IS_ERR(ret)))
-                printk("%s: error mounting logfilefs", MODNAME);
+        {
+                pr_err("%s: error mounting logfilefs", MODNAME);
+                goto out;
+        }
         else
-                printk("%s: logfilefs is succesfully mounted on from device %s\n", MODNAME, dev_name);
+                pr_info("%s: logfilefs is succesfully mounted on from device %s\n", MODNAME, dev_name);
 
+        err = logfilefs_init_inode();
+        if (err < 0)
+                ret = ERR_PTR(err);
+
+        release_lock();
+
+out:
         return ret;
 }
 
@@ -462,54 +520,168 @@ static struct file_system_type logfilefs_type = {
     .kill_sb = logfilefs_kill_superblock,
 };
 
+bool is_mounted(void)
+{
+        bool ret = false;
+        if (device_sb != NULL && device_sb->s_count != 0)
+                ret = true;
+        return ret;
+}
+
+void get_lock(void)
+{
+        mutex_lock(&device_mutex);
+}
+
+void release_lock(void)
+{
+        mutex_unlock(&device_mutex);
+}
+
+void logfilefs_update_file_size(loff_t file_size)
+{
+        struct buffer_head *bh;
+        logfilefs_inode *inode;
+        struct inode *the_inode;
+
+        the_inode = iget_locked(device_sb, LOGFILEFS_FILE_INODE_NUMBER);
+        if (!the_inode)
+        {
+                pr_err("%s: can not get logfile inode from vfs\n", MODNAME);
+                return;
+        }
+        i_size_write(the_inode, file_size);
+        inode_unlock(the_inode);
+
+        bh = sb_bread(device_sb, LOGFILEFS_INODES_BLOCK_NUMBER);
+        if (!bh)
+                return;
+        inode = (logfilefs_inode *)bh->b_data;
+        inode->file_size = file_size;
+        mark_buffer_dirty(bh);
+        sync_dirty_buffer(bh);
+        brelse(bh);
+}
+
+loff_t logfilefs_get_file_size(void)
+{
+        struct buffer_head *bh;
+        logfilefs_inode *inode;
+        loff_t file_size;
+
+        bh = sb_bread(device_sb, LOGFILEFS_INODES_BLOCK_NUMBER);
+        if (!bh)
+                return -EIO;
+        inode = (logfilefs_inode *)bh->b_data;
+        file_size = inode->file_size;
+        brelse(bh);
+
+        return file_size;
+}
+
+ssize_t write_logfilefs(char *data, size_t len)
+{
+        int block_to_write;
+        loff_t file_size, offset;
+        loff_t maxbytes = device_sb->s_maxbytes;
+        ssize_t bytes_written = 0;
+        struct buffer_head *bh;
+
+        file_size = logfilefs_get_file_size();
+        if (file_size < 0)
+                return -EIO;
+
+        pr_info("%s: file size before write %lld\n", MODNAME, file_size);
+
+        offset = file_size; // always append
+
+        // check file size
+        if (file_size == maxbytes)
+        {
+                pr_err("%s: logfile is full\n", MODNAME);
+                return -ENOSPC; // fs full
+        }
+
+        if (file_size + len > maxbytes)
+                len = maxbytes - file_size; // can't write all the bytes
+
+        // write log_entry
+        while (bytes_written < len)
+        {
+                int bytes_to_write = min(len - bytes_written, (size_t)(DEFAULT_BLOCK_SIZE - (offset % DEFAULT_BLOCK_SIZE)));
+                block_to_write = offset / DEFAULT_BLOCK_SIZE + 2;
+
+                bh = sb_bread(device_sb, block_to_write);
+                if (!bh)
+                {
+                        pr_err("%s: can not get the block for logging work\n", MODNAME);
+                        logfilefs_update_file_size(file_size);
+                        return -EIO;
+                }
+                // pr_info("%s: Writing %d bytes inside block %d\n", MODNAME, bytes_to_write, block_to_write);
+                memcpy((bh->b_data + (offset % DEFAULT_BLOCK_SIZE)), (data + bytes_written), bytes_to_write);
+                // pr_info("%s: Written %d bytes inside block %d\n", MODNAME, bytes_to_write, block_to_write);
+                mark_buffer_dirty(bh);
+                // pr_info("%s: buffer_head marked as dirty\n", MODNAME);
+                sync_dirty_buffer(bh);
+                // pr_info("%s: dirty buffer_head synced\n", MODNAME);
+                brelse(bh);
+                // pr_info("%s: buffer_head released\n", MODNAME);
+
+                bytes_written += bytes_to_write;
+                offset += bytes_to_write;
+                file_size += bytes_to_write;
+                logfilefs_update_file_size(file_size);
+        }
+
+        pr_info("%s: file size after write %lld\n", MODNAME, file_size);
+        return bytes_written;
+}
+
 int init_module(void)
 {
         int i, ret;
 
         if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0))
         {
-                printk("%s: unsupported kernel version", MODNAME);
+                pr_notice("%s: unsupported kernel version", MODNAME);
                 return -1;
         };
 
         if (the_syscall_table == 0x0)
         {
-                printk("%s: cannot manage sys_call_table address set to 0x0\n", MODNAME);
+                pr_notice("%s: cannot manage sys_call_table address set to 0x0\n", MODNAME);
                 return -1;
         }
 
         if (check_password_length(the_password) < 0)
         {
-                printk("%s: invalid password length.\n", MODNAME);
+                pr_notice("%s: invalid password length.\n", MODNAME);
                 return ret;
         }
 
         ret = hash_password(the_password, strlen(the_password), digest_password);
         if (ret < 0)
         {
-                printk("%s: failed to hash password: %d\n", MODNAME, ret);
+                pr_err("%s: failed to hash password: %d\n", MODNAME, ret);
                 return ret;
-        }
-        else
-        {
-                printk("%s: password hashed successfully\n", MODNAME);
         }
 
         AUDIT
         {
-                printk("%s: reference_monitor received sys_call_table address %px\n", MODNAME, (void *)the_syscall_table);
-                printk("%s: initializing - hacked entries %d\n", MODNAME, HACKED_ENTRIES);
+                pr_info("%s: reference_monitor received sys_call_table address %px\n", MODNAME, (void *)the_syscall_table);
+                pr_info("%s: initializing - hacked entries %d\n", MODNAME, HACKED_ENTRIES);
         }
 
         new_sys_call_array[0] = (unsigned long)sys_change_state;
-        new_sys_call_array[1] = (unsigned long)sys_edit_path;
+        new_sys_call_array[1] = (unsigned long)sys_edit_paths;
         new_sys_call_array[2] = (unsigned long)sys_change_password;
 
         ret = get_entries(restore, HACKED_ENTRIES, (unsigned long *)the_syscall_table, &the_ni_syscall);
 
         if (ret != HACKED_ENTRIES)
         {
-                printk("%s: could not hack %d entries (just %d)\n", MODNAME, HACKED_ENTRIES, ret);
+                pr_err("%s: could not hack %d entries (just %d)\n", MODNAME, HACKED_ENTRIES, ret);
                 return -1;
         }
 
@@ -524,24 +696,34 @@ int init_module(void)
 
         AUDIT
         {
-                printk("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
-                printk("%s: %s is at table entry %d\n", MODNAME, "_change_state", restore[0]);
-                printk("%s: %s is at table entry %d\n", MODNAME, "_edit_path", restore[1]);
-                printk("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
+                pr_info("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
+                pr_info("%s: %s is at table entry %d\n", MODNAME, "_change_state", restore[0]);
+                pr_info("%s: %s is at table entry %d\n", MODNAME, "_edit_paths", restore[1]);
+                pr_info("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
         }
+
+        // mutex init
+        mutex_init(&device_mutex);
 
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
-                printk("%s: sucessfully registered logfilefs\n", MODNAME);
+                pr_info("%s: sucessfully registered logfilefs\n", MODNAME);
         else
         {
-                printk("%s: failed to register logfilefs - error %d", MODNAME, ret);
+                pr_err("%s: failed to register logfilefs - error %d", MODNAME, ret);
                 return -1;
         }
 
-        //register hooks
-        ret = register_hooks();      
+        // register hooks
+        ret = register_hooks();
+        if (likely(ret == 0))
+                pr_info("%s: sucessfully registered hooks\n", MODNAME);
+        else
+        {
+                pr_err("%s: failed to register hooks - error %d", MODNAME, ret);
+                return -1;
+        }
 
         return ret;
 }
@@ -550,16 +732,16 @@ void cleanup_module(void)
 {
         int i, ret;
 
-        printk("%s: shutting down\n", MODNAME);
+        pr_info("%s: shutting down\n", MODNAME);
 
         cleanup_list();
 
         // unregister filesystem
         ret = unregister_filesystem(&logfilefs_type);
         if (likely(ret == 0))
-                printk("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
+                pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
         else
-                printk("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
+                pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
 
         unregister_hooks();
 
@@ -570,5 +752,5 @@ void cleanup_module(void)
         }
         protect_memory();
 
-        printk("%s: sys-call table restored to its original content\n", MODNAME);
+        pr_info("%s: sys-call table restored to its original content\n", MODNAME);
 }

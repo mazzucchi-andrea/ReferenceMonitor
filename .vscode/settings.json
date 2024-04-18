@@ -7,7 +7,13 @@
         "memory_resource": "c",
         "random": "c",
         "logfilefs.h": "c",
-        "charconv": "c"
+        "charconv": "c",
+        "array": "c",
+        "string_view": "c",
+        "format": "c",
+        "initializer_list": "c",
+        "span": "c",
+        "valarray": "c"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/clang"
 }

@@ -24,7 +24,7 @@ typedef struct _log_work
     pid_t ttid;
     kuid_t uid;
     kuid_t euid;
-    char *target_func;
+    const char *target_func;
     char *target_path;
     char *exe_pathname;
 } log_work;
@@ -241,118 +241,7 @@ out_lock:
     module_put(THIS_MODULE);
 }
 
-static int the_pre_unlink_hook(struct kprobe *ri, struct pt_regs *the_regs)
-{
-    struct pt_regs *regs;
-    log_work *the_log_work;
-    struct timespec64 now;
-    struct tm tm_now;
-    char *pathname, *exe_pathname, *exe_pathname_buf, *buf;
-    int ret = -1;
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        return -1;
-
-    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
-    if (!buf)
-    {
-        pr_err("%s: failed memory allocation for buffer\n", MODNAME);
-        return -ENOMEM;
-    }
-
-    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
-
-    // copy pathname from user space
-    ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
-    if (ret < 0)
-    {
-        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, unlink, ret);
-        goto out_free_buf;
-    }
-
-    pathname = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
-    if (!pathname)
-    {
-        pr_err("%s: failed memory allocation for pathname\n", MODNAME);
-        ret = -ENOMEM;
-        goto out_free_buf;
-    }
-
-    // copy pathname from buf
-    memcpy(pathname, buf, strlen(buf) + 1);
-
-    if (check_path(pathname) != 0)
-    {
-        ret = -1;
-        goto out_free_path;
-    }
-    regs->di = (unsigned long)NULL;
-    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, unlink, pathname);
-
-    // d_path for exe_pathname
-    exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
-    if (IS_ERR(exe_pathname_buf))
-    {
-        ret = -PTR_ERR(exe_pathname_buf);
-        goto out_free_path;
-    }
-
-    exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
-    if (!exe_pathname)
-    {
-        pr_err("%s: failed memory allocation for exe_pathname\n", MODNAME);
-        ret = -ENOMEM;
-        goto out_free_path;
-    }
-
-    // copy exe_pathname from buf
-    memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
-
-    // prepare log_work
-    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
-    if (!the_log_work)
-    {
-        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
-        goto out_free_exe;
-    }
-
-    the_log_work->target_func = unlink;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = pathname;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
-
-    INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
-
-    if (!try_module_get(THIS_MODULE))
-    {
-        ret = -ENODEV;
-        goto out_free_work;
-    }
-
-    ret = -1;
-    goto out_free_buf;
-
-out_free_work:
-    kfree(the_log_work);
-out_free_exe:
-    kfree(exe_pathname);
-out_free_path:
-    kfree(pathname);
-out_free_buf:
-    kfree(buf);
-    return ret;
-}
-
-static int the_pre_unlinkat_hook(struct kprobe *ri, struct pt_regs *the_regs)
+static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
     log_work *the_log_work;
@@ -398,7 +287,7 @@ static int the_pre_unlinkat_hook(struct kprobe *ri, struct pt_regs *the_regs)
         goto out_free_path;
     }
     regs->si = (unsigned long)NULL;
-    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, unlinkat, pathname);
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, pathname);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
@@ -428,7 +317,7 @@ static int the_pre_unlinkat_hook(struct kprobe *ri, struct pt_regs *the_regs)
         goto out_free_exe;
     }
 
-    the_log_work->target_func = unlinkat;
+    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
     the_log_work->gid = current->cred->gid;
     the_log_work->ttid = task_pid_vnr(current);
     the_log_work->uid = current->cred->uid;
@@ -463,7 +352,7 @@ out_free_buf:
     return ret;
 }
 
-static int the_pre_open_hook(struct kprobe *ri, struct pt_regs *the_regs)
+static int the_pre_open_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
     log_work *the_log_work;
@@ -493,7 +382,7 @@ static int the_pre_open_hook(struct kprobe *ri, struct pt_regs *the_regs)
     ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
     if (ret < 0)
     {
-        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, open, ret);
+        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
         goto out_free_buf;
     }
 
@@ -514,7 +403,7 @@ static int the_pre_open_hook(struct kprobe *ri, struct pt_regs *the_regs)
         goto out_free_path;
     }
     regs->di = (unsigned long)NULL;
-    pr_notice("%s: The %s with %d flags target %s is a protected pathname.\n", MODNAME, open, flags, pathname);
+    pr_notice("%s: The %s with %d flags target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, flags, pathname);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
@@ -544,7 +433,7 @@ static int the_pre_open_hook(struct kprobe *ri, struct pt_regs *the_regs)
         goto out_free_exe;
     }
 
-    the_log_work->target_func = open;
+    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
     the_log_work->gid = current->cred->gid;
     the_log_work->ttid = task_pid_vnr(current);
     the_log_work->uid = current->cred->uid;
@@ -579,7 +468,8 @@ out_free_buf:
     return ret;
 }
 
-static int the_pre_rename_hook(struct kprobe *ri, struct pt_regs *the_regs)
+// pre handler for syscall that have the pathname as first arg
+static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
     log_work *the_log_work;
@@ -604,7 +494,7 @@ static int the_pre_rename_hook(struct kprobe *ri, struct pt_regs *the_regs)
     ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
     if (ret < 0)
     {
-        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, rename, ret);
+        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
         goto out_free_buf;
     }
 
@@ -625,7 +515,7 @@ static int the_pre_rename_hook(struct kprobe *ri, struct pt_regs *the_regs)
         goto out_free_path;
     }
     regs->di = (unsigned long)NULL;
-    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, rename, pathname);
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, pathname);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
@@ -655,7 +545,7 @@ static int the_pre_rename_hook(struct kprobe *ri, struct pt_regs *the_regs)
         goto out_free_exe;
     }
 
-    the_log_work->target_func = rename;
+    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
     the_log_work->gid = current->cred->gid;
     the_log_work->ttid = task_pid_vnr(current);
     the_log_work->uid = current->cred->uid;
@@ -690,12 +580,13 @@ out_free_buf:
     return ret;
 }
 
+
 int register_hooks(void)
 {
     int i, ret;
 
     kretprobes[0].kp.symbol_name = unlink;
-    kretprobes[0].entry_handler = (kretprobe_handler_t)the_pre_unlink_hook;
+    kretprobes[0].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
     kretprobes[0].maxactive = -1;
 
     kretprobes[1].kp.symbol_name = unlinkat;
@@ -707,7 +598,7 @@ int register_hooks(void)
     kretprobes[2].maxactive = -1;
 
     kretprobes[3].kp.symbol_name = rename;
-    kretprobes[3].entry_handler = (kretprobe_handler_t)the_pre_rename_hook;
+    kretprobes[3].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
     kretprobes[3].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)

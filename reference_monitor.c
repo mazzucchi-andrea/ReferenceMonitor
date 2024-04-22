@@ -60,13 +60,13 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
                 return PTR_ERR(tfm);
         }
 
-        desc = kmalloc(sizeof(struct shash_desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
+        desc = (struct shash_desc *)kmalloc(sizeof(struct shash_desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
         if (!desc)
                 goto out_free_tfm;
 
         desc->tfm = tfm;
 
-        digest = kmalloc(SHA256_DIGEST_SIZE, GFP_KERNEL);
+        digest = (u8 *)kmalloc(SHA256_DIGEST_SIZE, GFP_KERNEL);
         if (!digest)
                 goto out_free_desc;
 
@@ -88,26 +88,15 @@ out_free_tfm:
         return ret;
 }
 
-int check_password_length(char *password)
-{
-        if (strlen(password) > PASSWORD_MAX_LEN || strlen(password) <= 0)
-                return -1;
-        return 0;
-}
-
 int check_password(char *password)
 {
         u8 digest[SHA256_DIGEST_SIZE];
 
-        if (check_password_length(password) < 0)
-        {
+        if (strlen(password) <= 0)
                 return -1;
-        }
 
         if (hash_password(password, strlen(password), digest) < 0)
-        {
                 return -1;
-        }
 
         if (memcmp(digest_password, digest, SHA256_DIGEST_SIZE) != 0)
                 return -1;
@@ -170,7 +159,7 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
                 return -EPERM;
         }
 
-        copied = strncpy_from_user(passwd_buf, password, sizeof(passwd_buf));
+        copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN + 1);
         if (copied < 0)
         {
                 return -EFAULT;
@@ -234,7 +223,7 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
                 return -1;
         }
 
-        copied = strncpy_from_user(passwd_buf, password, sizeof(passwd_buf));
+        copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN + 1);
         if (copied < 0)
         {
                 pr_err("%s: failing copy password from user\n", MODNAME);
@@ -253,14 +242,14 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
                 return -1;
         }
 
-        path_buf = (char *)kmalloc((PATH_MAX), GFP_KERNEL);
+        path_buf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
         if (!path_buf)
         {
                 pr_err("%s: kmalloc failing for path buffer\n", MODNAME);
                 return -ENOMEM;
         }
 
-        copied = strncpy_from_user(path_buf, path, (PATH_MAX));
+        copied = strncpy_from_user(path_buf, path, PATH_MAX);
         if (copied < 0)
         {
                 pr_err("%s: failing copy path from user\n", MODNAME);
@@ -282,13 +271,13 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
 
         if (ret < 0)
         {
-                pr_err("%s: error edit path list\n", MODNAME);
                 kfree(path_buf);
                 return ret;
         }
-
+        
         print_paths();
 
+        kfree(path_buf);
         return 0;
 }
 
@@ -308,13 +297,13 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
                 return -EPERM;
         }
 
-        copied = strncpy_from_user(old_passwd_buf, old_password, sizeof(old_passwd_buf));
+        copied = strncpy_from_user(old_passwd_buf, old_password, PASSWORD_MAX_LEN + 1);
         if (copied < 0)
         {
                 return -EFAULT;
         }
 
-        copied = strncpy_from_user(new_passwd_buf, new_password, sizeof(new_passwd_buf));
+        copied = strncpy_from_user(new_passwd_buf, new_password, PASSWORD_MAX_LEN + 1);
         if (copied < 0)
         {
                 return -EFAULT;
@@ -326,7 +315,7 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
                 return -1;
         }
 
-        if (check_password_length(new_passwd_buf) < 0)
+        if (strlen(new_passwd_buf) <= 0)
         {
                 pr_notice("%s: invalid new password length\n", MODNAME);
                 return -1;
@@ -591,8 +580,6 @@ ssize_t write_logfilefs(char *data, size_t len)
         if (file_size < 0)
                 return -EIO;
 
-        pr_info("%s: file size before write %lld\n", MODNAME, file_size);
-
         offset = file_size; // always append
 
         // check file size
@@ -634,7 +621,6 @@ ssize_t write_logfilefs(char *data, size_t len)
                 logfilefs_update_file_size(file_size);
         }
 
-        pr_info("%s: file size after write %lld\n", MODNAME, file_size);
         return bytes_written;
 }
 
@@ -654,7 +640,7 @@ int init_module(void)
                 return -1;
         }
 
-        if (check_password_length(the_password) < 0)
+        if (strlen(the_password) <= 0)
         {
                 pr_notice("%s: invalid password length.\n", MODNAME);
                 return ret;
@@ -735,6 +721,7 @@ void cleanup_module(void)
         pr_info("%s: shutting down\n", MODNAME);
 
         cleanup_list();
+        pr_info("%s: cleaning path list\n", MODNAME);
 
         // unregister filesystem
         ret = unregister_filesystem(&logfilefs_type);
@@ -744,6 +731,7 @@ void cleanup_module(void)
                 pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
 
         unregister_hooks();
+        pr_info("%s: unregistered hooks\n", MODNAME);
 
         unprotect_memory();
         for (i = 0; i < HACKED_ENTRIES; i++)
@@ -751,6 +739,5 @@ void cleanup_module(void)
                 ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
         }
         protect_memory();
-
         pr_info("%s: sys-call table restored to its original content\n", MODNAME);
 }

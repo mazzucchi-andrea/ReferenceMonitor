@@ -1,5 +1,6 @@
 #include <linux/kprobes.h>
 #include <linux/dcache.h>
+#include <linux/file.h>
 #include <linux/workqueue.h>
 #include <linux/uidgid.h>
 
@@ -7,8 +8,9 @@
 #include "path_list.h"
 
 #define unlink "__x64_sys_unlink"
+#define open "__x64_sys_open"
 
-#define BUFFER_SIZE 4096
+#define HOOKS 2
 
 #define get(regs) regs = (struct pt_regs *)the_regs->di;
 
@@ -26,7 +28,7 @@ typedef struct _log_work
 } log_work;
 
 // kretprobes
-struct kretprobe unlink_kretprobe;
+struct kretprobe kretprobes[HOOKS];
 
 int binary2hexadecimal(const u8 *bin, size_t bin_len, char *buf, size_t buf_len)
 {
@@ -68,7 +70,7 @@ int calculate_checksum(const char *filename, u8 *checksum)
 
     file_size = i_size_read(file->f_inode);
 
-    data = kmalloc(file_size, GFP_KERNEL);
+    data = (u8 *)kmalloc(file_size, GFP_KERNEL);
     if (!data)
     {
         ret = -ENOMEM;
@@ -77,7 +79,7 @@ int calculate_checksum(const char *filename, u8 *checksum)
 
     while (pos < file_size)
     {
-        bytes_read = kernel_read(file, data + pos, BUFFER_SIZE, &pos);
+        bytes_read = kernel_read(file, data + pos, file_size, &pos);
         if (bytes_read <= 0)
             break;
     }
@@ -90,7 +92,7 @@ int calculate_checksum(const char *filename, u8 *checksum)
         goto out_free_data;
     }
 
-    desc = kmalloc(sizeof(struct shash_desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
+    desc = (struct shash_desc *)kmalloc(sizeof(struct shash_desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
     if (!desc)
     {
         ret = -ENOMEM;
@@ -127,10 +129,10 @@ int write_log_entry(log_work *entry_data, u8 *checksum)
     char *log_entry, *checksum_hex;
     int ret, len = 0;
 
-    checksum_hex = kmalloc(SHA256_DIGEST_SIZE * 2 + 1, GFP_KERNEL);
+    checksum_hex = (char *)kmalloc(SHA256_DIGEST_SIZE * 2 + 1, GFP_KERNEL);
     if (!checksum_hex)
     {
-        pr_err("%s: error kmalloc for hex checksum\n", MODNAME);
+        pr_err("%s: failed memory allocation for hex checksum\n", MODNAME);
         goto skip_checksum;
     }
 
@@ -140,7 +142,6 @@ int write_log_entry(log_work *entry_data, u8 *checksum)
     {
         pr_err("%s: error %d during checksum conversion to hex\n", MODNAME, ret);
     }
-    pr_info("%s: hex checksum len %ld\n", MODNAME, strlen(checksum_hex));
 
 skip_checksum:
     // get log entry length
@@ -162,17 +163,15 @@ skip_checksum:
     if (len < 0)
     {
         pr_err("%s: error formatting log_entry with err %d \n", MODNAME, ret);
-        goto out;
+        goto out_hex;
     }
 
-    pr_info("%s: log_entry length %d\n", MODNAME, len);
-
-    log_entry = kmalloc(len + 1, GFP_KERNEL);
+    log_entry = (char *)kmalloc(len + 1, GFP_KERNEL);
     if (!log_entry)
     {
-        pr_err("%s: failing kmalloc for log_entry\n", MODNAME);
+        pr_err("%s: failed memory allocation for for log_entry\n", MODNAME);
         ret = -ENOMEM;
-        goto out;
+        goto out_hex;
     }
 
     ret = snprintf(log_entry, len + 1, log_entry_base,
@@ -196,18 +195,17 @@ skip_checksum:
         goto out;
     }
 
-    // pr_info("%s: log_entry:\n%s", MODNAME, log_entry);
-
     ret = write_logfilefs(log_entry, len);
     if (ret < 0)
         pr_err("%s: error %d during header\n", MODNAME, ret);
     else if (ret == 0)
         pr_info("%s: no bytes written during header\n", MODNAME);
-    else
-        pr_info("%s: log entry written bytes %d\n", MODNAME, ret);
 
 out:
     kfree(log_entry);
+out_hex:
+    if (checksum_hex)
+        kfree(checksum_hex);
     return ret;
 }
 
@@ -247,17 +245,16 @@ static int the_pre_unlink_hook(struct kprobe *ri, struct pt_regs *the_regs)
     log_work *the_log_work;
     struct timespec64 now;
     struct tm tm_now;
-    struct work_struct log_work;
     char *pathname, *exe_pathname, *exe_pathname_buf, *buf;
     int ret = -1;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         return -1;
 
-    buf = kmalloc(PATH_MAX, GFP_ATOMIC);
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
     if (!buf)
     {
-        pr_err("%s: kmalloc failing for buffer\n", MODNAME);
+        pr_err("%s: failed memory allocation for buffer\n", MODNAME);
         return -ENOMEM;
     }
 
@@ -267,15 +264,14 @@ static int the_pre_unlink_hook(struct kprobe *ri, struct pt_regs *the_regs)
     ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
     if (ret < 0)
     {
-        pr_err("%s: Failed to copy pathname from user space with error %d\n", MODNAME, ret);
+        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, unlink, ret);
         goto out_free_buf;
     }
 
-    // kmalloc pathname
-    pathname = kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+    pathname = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
     if (!pathname)
     {
-        pr_err("%s: kmalloc failing for pathname\n", MODNAME);
+        pr_err("%s: failed memory allocation for pathname\n", MODNAME);
         ret = -ENOMEM;
         goto out_free_buf;
     }
@@ -288,21 +284,21 @@ static int the_pre_unlink_hook(struct kprobe *ri, struct pt_regs *the_regs)
         ret = -1;
         goto out_free_path;
     }
-    pr_notice("%s: The unlink target %s is a protected pathname.\n", MODNAME, pathname);
+    regs->di = (unsigned long)NULL;
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, unlink, pathname);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
-    if (IS_ERR(exe_pathname))
+    if (IS_ERR(exe_pathname_buf))
     {
         ret = -PTR_ERR(exe_pathname_buf);
         goto out_free_path;
     }
 
-    // kmalloc exe_pathname
-    exe_pathname = kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
+    exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
     if (!exe_pathname)
     {
-        pr_err("%s: kmalloc failing for exe_pathname\n", MODNAME);
+        pr_err("%s: failed memory allocation for exe_pathname\n", MODNAME);
         ret = -ENOMEM;
         goto out_free_path;
     }
@@ -311,10 +307,10 @@ static int the_pre_unlink_hook(struct kprobe *ri, struct pt_regs *the_regs)
     memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
 
     // prepare log_work
-    the_log_work = kzalloc(sizeof(log_work), GFP_ATOMIC);
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
     if (!the_log_work)
     {
-        pr_err("%s: kmalloc failing for log_work\n", MODNAME);
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
         ret = -ENOMEM;
         goto out_free_exe;
     }
@@ -334,7 +330,121 @@ static int the_pre_unlink_hook(struct kprobe *ri, struct pt_regs *the_regs)
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
     schedule_work(&(the_log_work->the_work));
 
+    if (!try_module_get(THIS_MODULE))
+    {
+        ret = -ENODEV;
+        goto out_free_work;
+    }
+
+    ret = -1;
+    goto out_free_buf;
+
+out_free_work:
+    kfree(the_log_work);
+out_free_exe:
+    kfree(exe_pathname);
+out_free_path:
+    kfree(pathname);
+out_free_buf:
+    kfree(buf);
+    return ret;
+}
+
+static int the_pre_open_hook(struct kprobe *ri, struct pt_regs *the_regs)
+{
+    struct pt_regs *regs;
+    log_work *the_log_work;
+    struct timespec64 now;
+    struct tm tm_now;
+    char *pathname, *exe_pathname, *exe_pathname_buf, *buf;
+    int ret = -1, flags;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        return -1;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    flags = regs->si;
+
+    if (flags == O_RDONLY) // open read onlu are do not care
+        return -1;
+
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buf)
+    {
+        pr_err("%s: failed memory allocation for buffer\n", MODNAME);
+        return -ENOMEM;
+    }
+
+    // copy pathname from user space
+    ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
+    if (ret < 0)
+    {
+        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, open, ret);
+        goto out_free_buf;
+    }
+
+    pathname = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+    if (!pathname)
+    {
+        pr_err("%s: failed memory allocation for pathname\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_buf;
+    }
+
+    // copy pathname from buf
+    memcpy(pathname, buf, strlen(buf) + 1);
+
+    if (check_path(pathname) != 0)
+    {
+        ret = -1;
+        goto out_free_path;
+    }
     regs->di = (unsigned long)NULL;
+    pr_notice("%s: The %s with %d flags target %s is a protected pathname.\n", MODNAME, open, flags, pathname);
+
+    // d_path for exe_pathname
+    exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
+    if (IS_ERR(exe_pathname_buf))
+    {
+        ret = -PTR_ERR(exe_pathname_buf);
+        goto out_free_path;
+    }
+
+    exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
+    if (!exe_pathname)
+    {
+        pr_err("%s: failed memory allocation for exe_pathname\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_path;
+    }
+
+    // copy exe_pathname from buf
+    memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
+
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    the_log_work->target_func = open;
+    the_log_work->gid = current->cred->gid;
+    the_log_work->ttid = task_pid_vnr(current);
+    the_log_work->uid = current->cred->uid;
+    the_log_work->euid = current->cred->euid;
+    the_log_work->target_path = pathname;
+    the_log_work->exe_pathname = exe_pathname;
+
+    ktime_get_real_ts64(&now);
+    time64_to_tm(now.tv_sec, 0, &tm_now);
+    the_log_work->tm_violation = tm_now;
+
+    INIT_WORK(&(the_log_work->the_work), (void *)logger);
+    schedule_work(&(the_log_work->the_work));
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -358,49 +468,71 @@ out_free_buf:
 
 int register_hooks(void)
 {
-    int ret;
+    int i, ret;
 
-    unlink_kretprobe.kp.symbol_name = unlink;
-    unlink_kretprobe.entry_handler = (kretprobe_handler_t)the_pre_unlink_hook;
-    unlink_kretprobe.maxactive = -1;
+    kretprobes[0].kp.symbol_name = unlink;
+    kretprobes[0].entry_handler = (kretprobe_handler_t)the_pre_unlink_hook;
+    kretprobes[0].maxactive = -1;
 
-    // register unlink hook
-    ret = register_kretprobe(&unlink_kretprobe);
-    if (likely(ret == 0))
-        pr_info("%s: kretprobe register of %s success\n", MODNAME, unlink);
-    else
-        pr_err("%s: kretprobe register of %s failed, returned %d\n", MODNAME, unlink, ret);
+    kretprobes[1].kp.symbol_name = open;
+    kretprobes[1].entry_handler = (kretprobe_handler_t)the_pre_open_hook;
+    kretprobes[1].maxactive = -1;
+
+    for (i = 0; i < HOOKS; i++)
+    {
+        ret = register_kretprobe(&kretprobes[i]);
+        if (ret == 0)
+            pr_info("%s: kretprobes %s register success\n", MODNAME, kretprobes[i].kp.symbol_name);
+        else
+            pr_err("%s: kretprobes %s register failed, error %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
+    }
 
     return ret;
 }
 
 void unregister_hooks(void)
 {
-    unregister_kretprobe(&unlink_kretprobe);
+    int i;
+
+    for (i = 0; i < HOOKS; i++)
+        unregister_kretprobe(&kretprobes[i]);
 }
 
 int disable_hooks(void)
 {
-    int ret;
+    int i, ret;
 
-    ret = disable_kretprobe(&unlink_kretprobe);
-    if (likely(ret == 0))
-        pr_info("%s: kretprobe disable of %s success\n", MODNAME, unlink);
-    else
-        pr_err("%s: kretprobe disable of %s failed, returned %d\n", MODNAME, unlink, ret);
+    for (i = 0; i < HOOKS; i++)
+    {
+        ret = disable_kretprobe(&kretprobes[i]);
+        if (likely(ret == 0))
+            pr_info("%s: kretprobe disable of %s success\n", MODNAME, kretprobes[i].kp.symbol_name);
+        else
+        {
+            pr_err("%s: kretprobe disable of %s failed, err %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
+            unregister_hooks();
+        }
+    }
 
     return ret;
 }
 
 int enable_hooks(void)
 {
-    int ret;
+    int i, ret;
 
-    ret = enable_kretprobe(&unlink_kretprobe);
-    if (likely(ret == 0))
-        pr_info("%s: kretprobe enable of %s success\n", MODNAME, unlink);
-    else
-        pr_err("%s: kretprobe enable of %s failed, returned %d\n", MODNAME, unlink, ret);
+    for (i = 0; i < HOOKS; i++)
+    {
+        ret = enable_kretprobe(&kretprobes[i]);
+        if (likely(ret == 0))
+            pr_info("%s: kretprobe enable of %s success\n", MODNAME, kretprobes[i].kp.symbol_name);
+        else
+        {
+            pr_err("%s: kretprobe enable of %s failed, err %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
+            unregister_hooks();
+            ret = register_hooks();
+        }
+    }
 
     return ret;
 }

@@ -19,13 +19,16 @@ int main(void)
     ret = unlink(test_file_path);
     printf("Unlink return %d\n", ret);
 
+    ret = unlinkat(AT_FDCWD, test_file_path, 0);
+    printf("Unlinkat return %d\n", ret);
+
     ret = syscall(2, test_file_path, O_RDONLY);
-    printf("Open return %d\n", ret);
+    printf("Open with O_RDONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
 
     ret = syscall(2, test_file_path, O_WRONLY);
-    printf("Open return %d\n", ret);
+    printf("Open with O_WRONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
 

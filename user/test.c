@@ -32,5 +32,8 @@ int main(void)
     if (ret > 0)
         close(ret);
 
+    ret = rename(test_file_path, "/home/zyler/test_rename.txt");
+    printf("Rename return %d\n", ret);
+
     return ret;
 }

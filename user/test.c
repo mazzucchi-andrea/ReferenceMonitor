@@ -75,6 +75,48 @@ int main(void)
     ret = rename(test_file_path, "/home/zyler/test_rename.txt");
     printf("Rename return %d\n", ret);
 
+    ret = openat(AT_FDCWD, test_file_path, O_RDONLY);
+    printf("openat O_RDONLY test_file_path return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(AT_FDCWD, test_file_path, O_WRONLY);
+    printf("openat O_WRONLY test_file_path return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(AT_FDCWD, test_dir_path, O_RDONLY);
+    printf("openat O_RDONLY test_dir_path return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(AT_FDCWD, test_dir_path, O_WRONLY);
+    printf("openat O_WRONLY test_dir_path return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(dirfd, test_file_name, O_RDONLY);
+    printf("openat O_RDONLY test_file_name return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(dirfd, test_file_name, O_WRONLY);
+    printf("openat O_WRONLY test_file_name return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(dirfd, test_dir_name, O_RDONLY);
+    printf("openat O_RDONLY test_dir_name return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = openat(dirfd, test_dir_name, O_WRONLY);
+    printf("openat O_WRONLY test_dir_name return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    // remove paths
+
     ret = syscall(174, saved_password, test_file_path, 1);
     if (ret < 0)
     {

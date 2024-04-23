@@ -143,6 +143,9 @@ int main(void)
     if (ret > 0)
         close(ret);
 
+    ret = rmdir(test_dir_path);
+    printf("rmdir test_dir_path returns %d\n", ret);
+
     // remove paths
 
     ret = syscall(174, saved_password, test_file_path, 1);
@@ -206,6 +209,9 @@ int main(void)
 
     ret = creat(test_creat_path, mode);
     printf("creat return %d\n", ret);
+
+    ret = rmdir(parent_dir_path);
+    printf("rmdir parent_dir_path returns %d\n", ret);
 
     return ret;
 }

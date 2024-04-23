@@ -14,8 +14,9 @@
 #define creat "__x64_sys_creat"
 #define openat "__x64_sys_openat"
 #define openat2 "__x64_sys_openat2"
+#define rmdir "__x64_sys_rmdir"
 
-#define HOOKS 7
+#define HOOKS 8
 
 #define get(regs) regs = (struct pt_regs *)the_regs->di;
 
@@ -924,6 +925,10 @@ int register_hooks(void)
     kretprobes[6].kp.symbol_name = openat2;
     kretprobes[6].entry_handler = (kretprobe_handler_t)the_pre_openat2_hook;
     kretprobes[6].maxactive = -1;
+
+    kretprobes[7].kp.symbol_name = rmdir;
+    kretprobes[7].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[7].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)
     {

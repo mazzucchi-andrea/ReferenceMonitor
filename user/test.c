@@ -4,6 +4,9 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>       /* Definition of O_* and S_* constants */
+#include <sys/syscall.h> /* Definition of SYS_* constants */
+#include <linux/openat2.h>
 
 char *saved_password = "the_password";
 char *test_file_path = "/home/zyler/parent_dir/test.txt";
@@ -17,6 +20,7 @@ int main(void)
 {
     int ret, dirfd;
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    struct open_how how;
 
     dirfd = open(parent_dir_path, O_RDONLY);
     if (dirfd < 0)
@@ -45,7 +49,7 @@ int main(void)
     printf("Unlink test_file_path return %d\n", ret);
 
     ret = unlink(test_dir_path);
-    printf("Unlink test_file_path return %d\n", ret);
+    printf("Unlink test_dir_path return %d\n", ret);
 
     ret = unlinkat(AT_FDCWD, test_file_path, 0);
     printf("Unlinkat test_file_path return %d\n", ret);
@@ -62,12 +66,12 @@ int main(void)
     ret = unlinkat(dirfd, test_file_name, 0);
     printf("Unlinkat test_dir_name return %d\n", ret);
 
-    ret = syscall(2, test_file_path, O_RDONLY);
+    ret = syscall(SYS_open, test_file_path, O_RDONLY);
     printf("Open with O_RDONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
 
-    ret = syscall(2, test_file_path, O_WRONLY);
+    ret = syscall(SYS_open, test_file_path, O_WRONLY);
     printf("Open with O_WRONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
@@ -112,6 +116,30 @@ int main(void)
 
     ret = openat(dirfd, test_dir_name, O_WRONLY);
     printf("openat O_WRONLY test_dir_name return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    how.flags = O_RDONLY;
+
+    ret = syscall(SYS_openat2, AT_FDCWD, test_file_path, how);
+    printf("openat2 with O_RDONLY return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = syscall(SYS_openat2, dirfd, test_file_name, how);
+    printf("openat2 with O_RDONLY return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    how.flags = O_WRONLY;
+
+    ret = syscall(SYS_openat2, AT_FDCWD, test_file_path, how);
+    printf("openat2 with O_WRONLY return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = syscall(SYS_openat2, dirfd, test_file_name, how);
+    printf("openat2 with O_WRONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
 
@@ -163,12 +191,12 @@ int main(void)
     ret = unlinkat(dirfd, test_file_name, 0);
     printf("Unlinkat test_dir_name return %d\n", ret);
 
-    ret = syscall(2, test_file_path, O_RDONLY);
+    ret = syscall(SYS_open, test_file_path, O_RDONLY);
     printf("Open with O_RDONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
 
-    ret = syscall(2, test_file_path, O_WRONLY);
+    ret = syscall(SYS_open, test_file_path, O_WRONLY);
     printf("Open with O_WRONLY return %d\n", ret);
     if (ret > 0)
         close(ret);

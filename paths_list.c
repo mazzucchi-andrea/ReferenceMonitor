@@ -16,7 +16,7 @@ int check_path(const char *path)
     struct path_entry *entry;
     list_for_each_entry(entry, &paths, list)
     {
-        if (strcmp(entry->path, path) == 0)
+        if (strcmp(entry->path, path) == 0 || strncmp(entry->path, path, strlen(entry->path)) == 0)
             return 0;
     }
     return -1;

@@ -11,10 +11,21 @@ char *test_file_name = "test.txt";
 char *parent_dir_path = "/home/zyler/parent_dir";
 char *test_dir_name = "test_dir";
 char *test_dir_path = "/home/zyler/parent_dir/test_dir";
+char *test_creat_path = "/home/zyler/parent_dir/creat.txt";
 
 int main(void)
 {
     int ret, dirfd;
+    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+
+    dirfd = open(parent_dir_path, O_RDONLY);
+    if (dirfd < 0)
+    {
+        printf("Failing open parent_dir_path %d\n", dirfd);
+        return dirfd;
+    }
+
+    printf("Test Direct Path\n");
 
     ret = syscall(174, saved_password, test_file_path, 0);
     if (ret < 0)
@@ -43,12 +54,64 @@ int main(void)
     ret = unlinkat(AT_FDCWD, test_dir_path, 0);
     printf("Unlinkat test_dir_path return %d\n", ret);
 
-    dirfd = open(parent_dir_path, O_RDONLY);
-    if (dirfd < 0)
+    // test unlinkat relative dir dir
+    ret = unlinkat(dirfd, test_dir_name, AT_REMOVEDIR);
+    printf("Unlinkat test_dir_name return %d\n", ret);
+
+    // test unlinkat relative dir file
+    ret = unlinkat(dirfd, test_file_name, 0);
+    printf("Unlinkat test_dir_name return %d\n", ret);
+
+    ret = syscall(2, test_file_path, O_RDONLY);
+    printf("Open with O_RDONLY return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = syscall(2, test_file_path, O_WRONLY);
+    printf("Open with O_WRONLY return %d\n", ret);
+    if (ret > 0)
+        close(ret);
+
+    ret = rename(test_file_path, "/home/zyler/test_rename.txt");
+    printf("Rename return %d\n", ret);
+
+    ret = syscall(174, saved_password, test_file_path, 1);
+    if (ret < 0)
     {
-        printf("Failing open parent_dir_path %d\n", dirfd);
-        return dirfd;
+        printf("edit_path failed with error %d\n", errno);
+        return ret;
     }
+
+    ret = syscall(174, saved_password, test_dir_path, 1);
+    if (ret < 0)
+    {
+        printf("edit_path failed with error %d\n", errno);
+        return ret;
+    }
+
+    // Test with parent dir protected
+
+    printf("Test Parent Dir\n");
+
+    ret = syscall(174, saved_password, parent_dir_path, 0);
+    if (ret < 0)
+    {
+        printf("edit_path failed with error %d\n", errno);
+        return ret;
+    }
+
+    ret = unlink(test_file_path);
+    printf("Unlink test_file_path return %d\n", ret);
+
+    ret = unlink(test_dir_path);
+    printf("Unlink test_file_path return %d\n", ret);
+
+    ret = unlinkat(AT_FDCWD, test_file_path, 0);
+    printf("Unlinkat test_file_path return %d\n", ret);
+
+    // test unlinkat remove dir AT_FDCWD
+    ret = unlinkat(AT_FDCWD, test_dir_path, 0);
+    printf("Unlinkat test_dir_path return %d\n", ret);
 
     // test unlinkat relative dir dir
     ret = unlinkat(dirfd, test_dir_name, AT_REMOVEDIR);
@@ -70,6 +133,9 @@ int main(void)
 
     ret = rename(test_file_path, "/home/zyler/test_rename.txt");
     printf("Rename return %d\n", ret);
+
+    ret = creat(test_creat_path, mode);
+    printf("creat return %d\n", ret);
 
     return ret;
 }

@@ -11,8 +11,9 @@
 #define unlinkat "__x64_sys_unlinkat"
 #define open "__x64_sys_open"
 #define rename "__x64_sys_rename"
+#define creat "__x64_sys_creat"
 
-#define HOOKS 4
+#define HOOKS 5
 
 #define get(regs) regs = (struct pt_regs *)the_regs->di;
 
@@ -660,6 +661,10 @@ int register_hooks(void)
     kretprobes[3].kp.symbol_name = rename;
     kretprobes[3].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
     kretprobes[3].maxactive = -1;
+
+    kretprobes[4].kp.symbol_name = creat;
+    kretprobes[4].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[4].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)
     {

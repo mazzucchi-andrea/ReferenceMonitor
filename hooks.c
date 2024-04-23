@@ -10,13 +10,14 @@
 #define unlink "__x64_sys_unlink"
 #define unlinkat "__x64_sys_unlinkat"
 #define open "__x64_sys_open"
-#define rename "__x64_sys_rename"
-#define creat "__x64_sys_creat"
 #define openat "__x64_sys_openat"
 #define openat2 "__x64_sys_openat2"
+#define rename "__x64_sys_rename"
+#define renameat "__x64_sys_renameat"
+#define creat "__x64_sys_creat"
 #define rmdir "__x64_sys_rmdir"
 
-#define HOOKS 8
+#define HOOKS 9
 
 #define get(regs) regs = (struct pt_regs *)the_regs->di;
 
@@ -328,7 +329,7 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
         goto out_free_buf;
     }
 
-    if (dirfd != AT_FDCWD)
+    if (dirfd >= 0)
     {
         ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
         if (ret < 0)
@@ -568,7 +569,7 @@ static int the_pre_openat_hook(struct kretprobe_instance *ri, struct pt_regs *th
         goto out_free_buf;
     }
 
-    if (dirfd != AT_FDCWD)
+    if (dirfd >= 0)
     {
         ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
         if (ret < 0)
@@ -693,7 +694,126 @@ static int the_pre_openat2_hook(struct kretprobe_instance *ri, struct pt_regs *t
         goto out_free_buf;
     }
 
-    if (dirfd != AT_FDCWD)
+    if (dirfd >= 0)
+    {
+        ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
+        if (ret < 0)
+            goto out_free_buf;
+    }
+
+    target_path = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+    if (!target_path)
+    {
+        pr_err("%s: failed memory allocation for pathname\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_buf;
+    }
+
+    // copy pathname from buf
+    memcpy(target_path, buf, strlen(buf) + 1);
+
+    if (check_path(target_path) != 0)
+    {
+        ret = -1;
+        goto out_free_path;
+    }
+    regs->si = (unsigned long)NULL;
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, target_path);
+
+    // d_path for exe_pathname
+    exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
+    if (IS_ERR(exe_pathname_buf))
+    {
+        ret = -PTR_ERR(exe_pathname_buf);
+        goto out_free_path;
+    }
+
+    exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
+    if (!exe_pathname)
+    {
+        pr_err("%s: failed memory allocation for exe_pathname\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_path;
+    }
+
+    // copy exe_pathname from buf
+    memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
+
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
+    the_log_work->gid = current->cred->gid;
+    the_log_work->ttid = task_pid_vnr(current);
+    the_log_work->uid = current->cred->uid;
+    the_log_work->euid = current->cred->euid;
+    the_log_work->target_path = target_path;
+    the_log_work->exe_pathname = exe_pathname;
+
+    ktime_get_real_ts64(&now);
+    time64_to_tm(now.tv_sec, 0, &tm_now);
+    the_log_work->tm_violation = tm_now;
+
+    INIT_WORK(&(the_log_work->the_work), (void *)logger);
+    schedule_work(&(the_log_work->the_work));
+
+    if (!try_module_get(THIS_MODULE))
+    {
+        ret = -ENODEV;
+        goto out_free_work;
+    }
+
+    ret = -1;
+    goto out_free_buf;
+
+out_free_work:
+    kfree(the_log_work);
+out_free_exe:
+    kfree(exe_pathname);
+out_free_path:
+    kfree(target_path);
+out_free_buf:
+    kfree(buf);
+    return ret;
+}
+
+static int the_pre_renameat_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+{
+    struct pt_regs *regs;
+    struct timespec64 now;
+    struct tm tm_now;
+    log_work *the_log_work;
+    char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
+    int dirfd, ret = -1;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        return -1;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buf)
+    {
+        pr_err("%s: failed memory allocation for buffer\n", MODNAME);
+        return -ENOMEM;
+    }
+
+    ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
+    if (ret < 0)
+    {
+        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
+        goto out_free_buf;
+    }
+
+    dirfd = regs->di;
+
+    if (dirfd >= 0)
     {
         ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
         if (ret < 0)
@@ -910,25 +1030,29 @@ int register_hooks(void)
     kretprobes[2].entry_handler = (kretprobe_handler_t)the_pre_open_hook;
     kretprobes[2].maxactive = -1;
 
-    kretprobes[3].kp.symbol_name = rename;
-    kretprobes[3].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[3].kp.symbol_name = openat;
+    kretprobes[3].entry_handler = (kretprobe_handler_t)the_pre_openat_hook;
     kretprobes[3].maxactive = -1;
 
-    kretprobes[4].kp.symbol_name = creat;
-    kretprobes[4].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[4].kp.symbol_name = openat2;
+    kretprobes[4].entry_handler = (kretprobe_handler_t)the_pre_openat2_hook;
     kretprobes[4].maxactive = -1;
 
-    kretprobes[5].kp.symbol_name = openat;
-    kretprobes[5].entry_handler = (kretprobe_handler_t)the_pre_openat_hook;
+    kretprobes[5].kp.symbol_name = rename;
+    kretprobes[5].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
     kretprobes[5].maxactive = -1;
 
-    kretprobes[6].kp.symbol_name = openat2;
-    kretprobes[6].entry_handler = (kretprobe_handler_t)the_pre_openat2_hook;
+    kretprobes[6].kp.symbol_name = renameat;
+    kretprobes[6].entry_handler = (kretprobe_handler_t)the_pre_renameat_hook;
     kretprobes[6].maxactive = -1;
 
-    kretprobes[7].kp.symbol_name = rmdir;
+    kretprobes[7].kp.symbol_name = creat;
     kretprobes[7].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
     kretprobes[7].maxactive = -1;
+
+    kretprobes[8].kp.symbol_name = rmdir;
+    kretprobes[8].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[8].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)
     {

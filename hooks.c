@@ -7,10 +7,10 @@
 #include "reference_monitor.h"
 #include "path_list.h"
 
-#define unlink      "__x64_sys_unlink"
-#define unlinkat    "__x64_sys_unlinkat"
-#define open        "__x64_sys_open"
-#define rename      "__x64_sys_rename"
+#define unlink "__x64_sys_unlink"
+#define unlinkat "__x64_sys_unlinkat"
+#define open "__x64_sys_open"
+#define rename "__x64_sys_rename"
 
 #define HOOKS 4
 
@@ -241,17 +241,74 @@ out_lock:
     module_put(THIS_MODULE);
 }
 
+int reconstruct_complete_path(int dirfd, char *buf, size_t buf_size)
+{
+    struct file *dir_file;
+    char *dir_path_buf, *dir_path, *filename;
+    int ret;
+
+    filename = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+    if (!filename)
+    {
+        pr_err("%s: failed memory allocation for filename\n", MODNAME);
+        return -ENOMEM;
+    }
+    memcpy(filename, buf, strlen(buf) + 1);
+
+    dir_file = fget(dirfd);
+    if (!dir_file)
+    {
+        pr_err("%s: failed to get file object for directory file descriptor\n", MODNAME);
+        return -1;
+    }
+
+    dir_path_buf = d_path(&dir_file->f_path, buf, buf_size);
+    if (IS_ERR(dir_path_buf))
+    {
+        ret = -PTR_ERR(dir_path_buf);
+        goto out_free_filename;
+    }
+
+    dir_path = (char *)kmalloc(strlen(dir_path_buf) + 1, GFP_ATOMIC);
+    if (!dir_path)
+    {
+        pr_err("%s: failed memory allocation for exe_pathname\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_filename;
+    }
+
+    memcpy(dir_path, dir_path_buf, strlen(dir_path_buf) + 1);
+
+    memcpy(buf, dir_path, strlen(dir_path) + 1);
+    strcat(buf, "/");
+    strcat(buf, filename);
+
+    kfree(dir_path);
+out_free_filename:
+    kfree(filename);
+    return ret;
+}
+
 static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    log_work *the_log_work;
     struct timespec64 now;
     struct tm tm_now;
-    char *pathname, *exe_pathname, *exe_pathname_buf, *buf;
-    int ret = -1;
+    log_work *the_log_work;
+    char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
+    int dirfd, flag, ret = -1;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         return -1;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    dirfd = regs->di;
+
+    flag = regs->dx;
+
+    if ((flag & ~AT_REMOVEDIR) != 0)
+        return -EINVAL;
 
     buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
     if (!buf)
@@ -260,18 +317,22 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
         return -ENOMEM;
     }
 
-    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
-
-    // copy pathname from user space
     ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
     if (ret < 0)
     {
-        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, unlink, ret);
+        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
         goto out_free_buf;
     }
 
-    pathname = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
-    if (!pathname)
+    if (dirfd != AT_FDCWD)
+    {
+        ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
+        if (ret < 0)
+            goto out_free_buf;
+    }
+
+    target_path = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+    if (!target_path)
     {
         pr_err("%s: failed memory allocation for pathname\n", MODNAME);
         ret = -ENOMEM;
@@ -279,15 +340,15 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
     }
 
     // copy pathname from buf
-    memcpy(pathname, buf, strlen(buf) + 1);
+    memcpy(target_path, buf, strlen(buf) + 1);
 
-    if (check_path(pathname) != 0)
+    if (check_path(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
     }
     regs->si = (unsigned long)NULL;
-    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, pathname);
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, target_path);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
@@ -322,7 +383,7 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
     the_log_work->ttid = task_pid_vnr(current);
     the_log_work->uid = current->cred->uid;
     the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = pathname;
+    the_log_work->target_path = target_path;
     the_log_work->exe_pathname = exe_pathname;
 
     ktime_get_real_ts64(&now);
@@ -346,7 +407,7 @@ out_free_work:
 out_free_exe:
     kfree(exe_pathname);
 out_free_path:
-    kfree(pathname);
+    kfree(target_path);
 out_free_buf:
     kfree(buf);
     return ret;
@@ -579,7 +640,6 @@ out_free_buf:
     kfree(buf);
     return ret;
 }
-
 
 int register_hooks(void)
 {

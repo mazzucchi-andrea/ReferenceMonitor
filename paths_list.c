@@ -16,6 +16,17 @@ int check_path(const char *path)
     struct path_entry *entry;
     list_for_each_entry(entry, &paths, list)
     {
+        if (strcmp(entry->path, path) == 0)
+            return 0;
+    }
+    return -1;
+}
+
+int check_path_and_dir(const char *path)
+{
+    struct path_entry *entry;
+    list_for_each_entry(entry, &paths, list)
+    {
         if (strcmp(entry->path, path) == 0 || strncmp(entry->path, path, strlen(entry->path)) == 0)
             return 0;
     }
@@ -47,6 +58,7 @@ int add_path(const char *new_path)
         kfree(new_path_entry);
         return -1;
     }
+
     strcpy(new_path_entry->path, new_path);
 
     INIT_LIST_HEAD(&new_path_entry->list);

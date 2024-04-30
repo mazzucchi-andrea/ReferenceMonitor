@@ -100,18 +100,6 @@ void change_password()
     printf("Password Changed\n");
 }
 
-void test_unlink()
-{
-    int ret;
-    char path[PATH_MAX_LEN + 1];
-
-    printf("Enter the path (up to %d characters): ", PATH_MAX_LEN);
-    scanf("%4096s", path);
-
-    ret = unlink(path);
-    printf("Unlink return %d\n", ret);
-}
-
 int main()
 {
 
@@ -121,7 +109,6 @@ int main()
         printf("1. Invoke syscall change_state\n");
         printf("2. Invoke syscall edit_path\n");
         printf("3. Invoke syscall change_password\n");
-        printf("4. Test unlink\n");
         printf("0. Exit\n");
 
         int choice;
@@ -145,12 +132,6 @@ int main()
         case 3:
         {
             change_password();
-            break;
-        }
-
-        case 4:
-        {
-            test_unlink();
             break;
         }
 

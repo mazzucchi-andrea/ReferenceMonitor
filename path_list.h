@@ -6,6 +6,7 @@ struct path_entry;
 int add_path(const char *);
 int remove_path(const char *);
 int check_path(char *);
+int check_path_and_dir(char *);
 void print_paths(void);
 void cleanup_list(void);
 

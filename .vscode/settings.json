@@ -5,6 +5,9 @@
         "crypto.h": "c",
         "stdlib.h": "c",
         "logfilefs.h": "c",
+        "stdio.h": "c",
+        "cerrno": "c",
+        "fcntl.h": "c"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/clang"
 }

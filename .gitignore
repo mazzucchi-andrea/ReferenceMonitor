@@ -55,5 +55,7 @@ image
 logfilemakefs
 mount
 user/main
-user/test
-user/test_no_root
+user/test_syscall_no_root
+user/prepare_env_test
+user/parent_dir
+user/add_test_file_rf

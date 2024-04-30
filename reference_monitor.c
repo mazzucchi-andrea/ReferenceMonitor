@@ -71,7 +71,7 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
                 goto out_free_desc;
 
         ret = crypto_shash_digest(desc, password, password_len, digest);
-        if (ret < 0)
+        if (ret)
         {
                 pr_err("%s: error hashing password with err %d\n", MODNAME, ret);
                 goto out_free_digest;
@@ -205,9 +205,12 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
 {
         struct path path_struct;
         long copied;
-        int ret;
+        int ret = 0;
+        unsigned int lookup_flags = 0;
         char passwd_buf[PASSWORD_MAX_LEN + 1];
         char *path_buf;
+        const char *absolute_path;
+        lookup_flags |= LOOKUP_FOLLOW;
 
         pr_info("%s: _edit_paths called.\n", MODNAME);
 
@@ -220,9 +223,15 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
         if (mode != ADD && mode != REMOVE)
         {
                 pr_notice("%s: invalid mode\n", MODNAME);
-                return -1;
+                return -EINVAL;
         }
 
+        if (check_rec_state() < 0)
+        {
+                pr_notice("%s: invalid monitor state.\n", MODNAME);
+                return -1;
+        }
+        
         copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN + 1);
         if (copied < 0)
         {
@@ -236,49 +245,46 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
                 return -1;
         }
 
-        if (check_rec_state() < 0)
+        if (path[0] != '/') // relative path
         {
-                pr_notice("%s: invalid monitor state.\n", MODNAME);
-                return -1;
+                path_buf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
+                if (!path_buf)
+                {
+                        pr_err("%s: kmalloc failing for path buffer\n", MODNAME);
+                        return -ENOMEM;
+                }
+                ret = user_path_at(AT_FDCWD, path, lookup_flags, &path_struct);
+                if (ret)
+                        goto out;
+                absolute_path = d_path(&path_struct, path_buf, PATH_MAX);
+                if (IS_ERR(absolute_path))
+                {
+                        ret = -PTR_ERR(absolute_path);
+                        goto out;
+                }
         }
-
-        path_buf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
-        if (!path_buf)
+        else // absolute path
         {
-                pr_err("%s: kmalloc failing for path buffer\n", MODNAME);
-                return -ENOMEM;
-        }
-
-        copied = strncpy_from_user(path_buf, path, PATH_MAX);
-        if (copied < 0)
-        {
-                pr_err("%s: failing copy path from user\n", MODNAME);
-                kfree(path_buf);
-                return -EFAULT;
-        }
-
-        if (kern_path(path_buf, LOOKUP_FOLLOW, &path_struct) < 0)
-        {
-                pr_notice("%s: cannot resolving path\n", MODNAME);
-                kfree(path_buf);
-                return -1;
+                if (kern_path(path, LOOKUP_FOLLOW, &path_struct) < 0)
+                {
+                        pr_err("%s: cannot resolving path\n", MODNAME);
+                        return -ENOENT;
+                }
+                absolute_path = path;
         }
 
         if (mode == ADD)
-                ret = add_path(path_buf);
+                ret = add_path(absolute_path);
         else
-                ret = remove_path(path_buf);
+                ret = remove_path(absolute_path);
 
-        if (ret < 0)
-        {
+        if (!ret)
+                print_paths();
+
+out:
+        if (path_buf)
                 kfree(path_buf);
-                return ret;
-        }
-        
-        print_paths();
-
-        kfree(path_buf);
-        return 0;
+        return ret;
 }
 
 __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const char __user *, new_password)
@@ -322,7 +328,7 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
         }
 
         ret = hash_password(new_passwd_buf, strlen(new_passwd_buf), new_digest);
-        if (ret < 0)
+        if (ret)
         {
                 pr_err("%s: failing hashing new password\n", MODNAME);
                 return ret;
@@ -431,7 +437,6 @@ static void logfilefs_kill_superblock(struct super_block *s)
 
         return;
 }
-
 
 int logfilefs_init_inode(void)
 {
@@ -647,7 +652,7 @@ int init_module(void)
         }
 
         ret = hash_password(the_password, strlen(the_password), digest_password);
-        if (ret < 0)
+        if (ret)
         {
                 pr_err("%s: failed to hash password: %d\n", MODNAME, ret);
                 return ret;

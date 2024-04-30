@@ -1,5 +1,6 @@
 #include <linux/kprobes.h>
 #include <linux/dcache.h>
+#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/workqueue.h>
 #include <linux/uidgid.h>
@@ -14,10 +15,13 @@
 #define openat2 "__x64_sys_openat2"
 #define rename "__x64_sys_rename"
 #define renameat "__x64_sys_renameat"
+#define renameat2 "__x64_sys_renameat2"
 #define creat "__x64_sys_creat"
 #define rmdir "__x64_sys_rmdir"
 
-#define HOOKS 9
+#define calc_enoent "program attempting the illegal operation no longer exists"
+
+#define HOOKS 10
 
 #define get(regs) regs = (struct pt_regs *)the_regs->di;
 
@@ -61,8 +65,8 @@ int calculate_checksum(const char *filename, u8 *checksum)
 {
     struct crypto_shash *tfm;
     struct shash_desc *desc;
-    int ret = -ENOMEM;
     struct file *file;
+    int ret = -1;
     loff_t file_size, pos = 0;
     ssize_t bytes_read;
     u8 *data;
@@ -109,7 +113,7 @@ int calculate_checksum(const char *filename, u8 *checksum)
     desc->tfm = tfm;
 
     ret = crypto_shash_digest(desc, data, file_size, checksum);
-    if (ret < 0)
+    if (ret)
         pr_err("%s: failing checksum calculation err %d\n", MODNAME, ret);
 
     kfree(desc);
@@ -123,8 +127,12 @@ out:
     return ret;
 }
 
-int write_log_entry(log_work *entry_data, u8 *checksum)
+void logger(unsigned long data)
 {
+    log_work *work_data = container_of((void *)data, log_work, the_work);
+    u8 checksum[SHA256_DIGEST_SIZE] = {0};
+    int ret, len;
+    char *log_entry, *checksum_hex;
     char *log_entry_base = "%d-%02d-%02d\t%02d:%02d:%02d\t%s\n"
                            "gid:\t%d\n"
                            "ttid:\t%d\n"
@@ -133,8 +141,14 @@ int write_log_entry(log_work *entry_data, u8 *checksum)
                            "target_file:%s\n"
                            "exe_file:\t%s\n"
                            "%s\n";
-    char *log_entry, *checksum_hex;
-    int ret, len = 0;
+
+    get_lock(); // get write lock
+
+    if (!is_mounted())
+    {
+        pr_info("%s: The logfilefs is not mounted\n", MODNAME);
+        goto out_lock;
+    }
 
     checksum_hex = (char *)kmalloc(SHA256_DIGEST_SIZE * 2 + 1, GFP_KERNEL);
     if (!checksum_hex)
@@ -143,29 +157,35 @@ int write_log_entry(log_work *entry_data, u8 *checksum)
         goto skip_checksum;
     }
 
-    // convert checksum to hex string
-    ret = binary2hexadecimal(checksum, SHA256_DIGEST_SIZE, checksum_hex, SHA256_DIGEST_SIZE * 2 + 1);
-    if (ret < 0)
-    {
-        pr_err("%s: error %d during checksum conversion to hex\n", MODNAME, ret);
+    ret = calculate_checksum(work_data->exe_pathname, checksum);
+    if (ret)
+        pr_err("%s: failing calculate file checksum with error %d\n", MODNAME, ret);
+
+    if (ret == -ENOENT)
+        snprintf(checksum_hex, SHA256_DIGEST_SIZE * 2 + 1, calc_enoent);
+    else
+    { // convert checksum to hex string
+        ret = binary2hexadecimal(checksum, SHA256_DIGEST_SIZE, checksum_hex, SHA256_DIGEST_SIZE * 2 + 1);
+        if (ret)
+            pr_err("%s: error %d during checksum conversion to hex\n", MODNAME, ret);
     }
 
 skip_checksum:
     // get log entry length
     len = snprintf(NULL, 0, log_entry_base,
-                   entry_data->tm_violation.tm_year + 1900,
-                   entry_data->tm_violation.tm_mon + 1,
-                   entry_data->tm_violation.tm_mday,
-                   entry_data->tm_violation.tm_hour,
-                   entry_data->tm_violation.tm_min,
-                   entry_data->tm_violation.tm_sec,
-                   entry_data->target_func,
-                   entry_data->gid,
-                   entry_data->ttid,
-                   entry_data->uid,
-                   entry_data->euid,
-                   entry_data->target_path,
-                   entry_data->exe_pathname,
+                   work_data->tm_violation.tm_year + 1900,
+                   work_data->tm_violation.tm_mon + 1,
+                   work_data->tm_violation.tm_mday,
+                   work_data->tm_violation.tm_hour,
+                   work_data->tm_violation.tm_min,
+                   work_data->tm_violation.tm_sec,
+                   work_data->target_func,
+                   work_data->gid,
+                   work_data->ttid,
+                   work_data->uid,
+                   work_data->euid,
+                   work_data->target_path,
+                   work_data->exe_pathname,
                    checksum_hex);
     if (len < 0)
     {
@@ -182,19 +202,19 @@ skip_checksum:
     }
 
     ret = snprintf(log_entry, len + 1, log_entry_base,
-                   entry_data->tm_violation.tm_year + 1900,
-                   entry_data->tm_violation.tm_mon + 1,
-                   entry_data->tm_violation.tm_mday,
-                   entry_data->tm_violation.tm_hour,
-                   entry_data->tm_violation.tm_min,
-                   entry_data->tm_violation.tm_sec,
-                   entry_data->target_func,
-                   entry_data->gid,
-                   entry_data->ttid,
-                   entry_data->uid,
-                   entry_data->euid,
-                   entry_data->target_path,
-                   entry_data->exe_pathname,
+                   work_data->tm_violation.tm_year + 1900,
+                   work_data->tm_violation.tm_mon + 1,
+                   work_data->tm_violation.tm_mday,
+                   work_data->tm_violation.tm_hour,
+                   work_data->tm_violation.tm_min,
+                   work_data->tm_violation.tm_sec,
+                   work_data->target_func,
+                   work_data->gid,
+                   work_data->ttid,
+                   work_data->uid,
+                   work_data->euid,
+                   work_data->target_path,
+                   work_data->exe_pathname,
                    checksum_hex);
     if (ret < 0)
     {
@@ -205,7 +225,7 @@ skip_checksum:
     ret = write_logfilefs(log_entry, len);
     if (ret < 0)
         pr_err("%s: error %d during header\n", MODNAME, ret);
-    else if (ret == 0)
+    else if (!ret)
         pr_info("%s: no bytes written during header\n", MODNAME);
 
 out:
@@ -213,31 +233,6 @@ out:
 out_hex:
     if (checksum_hex)
         kfree(checksum_hex);
-    return ret;
-}
-
-void logger(unsigned long data)
-{
-    log_work *work_data = container_of((void *)data, log_work, the_work);
-    u8 checksum[SHA256_DIGEST_SIZE] = {0};
-    int ret = -1;
-
-    get_lock(); // get write lock
-
-    if (!is_mounted())
-    {
-        pr_info("%s: The logfilefs is not mounted\n", MODNAME);
-        goto out_lock;
-    }
-
-    ret = calculate_checksum(work_data->exe_pathname, checksum);
-    if (ret < 0)
-        pr_err("%s: failing calculate file checksum with error %d\n", MODNAME, ret);
-
-    ret = write_log_entry(work_data, checksum);
-    if (ret < 0)
-        pr_err("%s: error %d during write_log_entry\n", MODNAME, ret);
-
 out_lock:
     release_lock();
     kfree(work_data->target_path);
@@ -246,9 +241,8 @@ out_lock:
     module_put(THIS_MODULE);
 }
 
-int reconstruct_complete_path(int dirfd, char *buf, size_t buf_size)
+int reconstruct_complete_path(struct path path, char *buf, size_t buf_size)
 {
-    struct file *dir_file;
     char *dir_path_buf, *dir_path, *filename;
     int ret;
 
@@ -260,14 +254,7 @@ int reconstruct_complete_path(int dirfd, char *buf, size_t buf_size)
     }
     memcpy(filename, buf, strlen(buf) + 1);
 
-    dir_file = fget(dirfd);
-    if (!dir_file)
-    {
-        pr_err("%s: failed to get file object for directory file descriptor\n", MODNAME);
-        return -1;
-    }
-
-    dir_path_buf = d_path(&dir_file->f_path, buf, buf_size);
+    dir_path_buf = d_path(&path, buf, buf_size);
     if (IS_ERR(dir_path_buf))
     {
         ret = -PTR_ERR(dir_path_buf);
@@ -294,14 +281,30 @@ out_free_filename:
     return ret;
 }
 
+void fill_log_work(log_work *the_log_work, const char *target_func, char *target_path, char *exe_pathname)
+{
+    struct timespec64 now;
+    struct tm tm_now;
+
+    the_log_work->target_func = target_func;
+    the_log_work->gid = current->cred->gid;
+    the_log_work->ttid = task_pid_vnr(current);
+    the_log_work->uid = current->cred->uid;
+    the_log_work->euid = current->cred->euid;
+    the_log_work->target_path = target_path;
+    the_log_work->exe_pathname = exe_pathname;
+
+    ktime_get_real_ts64(&now);
+    time64_to_tm(now.tv_sec, 0, &tm_now);
+    the_log_work->tm_violation = tm_now;
+}
+
 static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct timespec64 now;
-    struct tm tm_now;
     log_work *the_log_work;
     char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
-    int dirfd, flag, ret = -1;
+    int dirfd, ret = -1;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         return -1;
@@ -309,11 +312,6 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
     get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
 
     dirfd = regs->di;
-
-    flag = regs->dx;
-
-    if ((flag & ~AT_REMOVEDIR) != 0)
-        return -EINVAL;
 
     buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
     if (!buf)
@@ -331,9 +329,12 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
 
     if (dirfd >= 0)
     {
-        ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
-        if (ret < 0)
+        ret = reconstruct_complete_path(files_fdtable(current->files)->fd[dirfd]->f_path, buf, PATH_MAX);
+        if (ret)
+        {
+            pr_err("%s: %s failed reconstruct complete path with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
             goto out_free_buf;
+        }
     }
 
     target_path = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
@@ -347,7 +348,7 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
     // copy pathname from buf
     memcpy(target_path, buf, strlen(buf) + 1);
 
-    if (check_path(target_path) != 0)
+    if (check_path_and_dir(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
@@ -383,20 +384,14 @@ static int the_pre_unlinkat_hook(struct kretprobe_instance *ri, struct pt_regs *
         goto out_free_exe;
     }
 
-    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = target_path;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
+    fill_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_pathname);
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
+    if (!schedule_work(&(the_log_work->the_work)))
+    {
+        ret = -1;
+        goto out_free_work;
+    }
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -421,10 +416,9 @@ out_free_buf:
 static int the_pre_open_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
+    struct path path;
     log_work *the_log_work;
-    struct timespec64 now;
-    struct tm tm_now;
-    char *pathname, *exe_pathname, *exe_pathname_buf, *buf;
+    char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
     int ret = -1, flags;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
@@ -452,8 +446,8 @@ static int the_pre_open_hook(struct kretprobe_instance *ri, struct pt_regs *the_
         goto out_free_buf;
     }
 
-    pathname = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
-    if (!pathname)
+    target_path = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+    if (!target_path)
     {
         pr_err("%s: failed memory allocation for pathname\n", MODNAME);
         ret = -ENOMEM;
@@ -461,15 +455,27 @@ static int the_pre_open_hook(struct kretprobe_instance *ri, struct pt_regs *the_
     }
 
     // copy pathname from buf
-    memcpy(pathname, buf, strlen(buf) + 1);
+    memcpy(target_path, buf, strlen(buf) + 1);
 
-    if (check_path(pathname) != 0)
+    ret = kern_path(target_path, LOOKUP_FOLLOW, &path);
+    if (ret)
+    {
+        // pr_err("%s: failed path lookup for %s with error %d\n", MODNAME, target_path, ret);
+        goto out_free_buf;
+    }
+    if (S_ISDIR(path.dentry->d_inode->i_mode))
+    {
+        ret = -1;
+        goto out_free_buf;
+    }
+
+    if (check_path(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
     }
     regs->di = (unsigned long)NULL;
-    pr_notice("%s: The %s with %d flags target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, flags, pathname);
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, target_path);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
@@ -499,20 +505,14 @@ static int the_pre_open_hook(struct kretprobe_instance *ri, struct pt_regs *the_
         goto out_free_exe;
     }
 
-    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = pathname;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
+    fill_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_pathname);
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
+    if (!schedule_work(&(the_log_work->the_work)))
+    {
+        ret = -1;
+        goto out_free_work;
+    }
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -528,7 +528,7 @@ out_free_work:
 out_free_exe:
     kfree(exe_pathname);
 out_free_path:
-    kfree(pathname);
+    kfree(target_path);
 out_free_buf:
     kfree(buf);
     return ret;
@@ -537,8 +537,7 @@ out_free_buf:
 static int the_pre_openat_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct timespec64 now;
-    struct tm tm_now;
+    struct path path;
     log_work *the_log_work;
     char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
     int dirfd, flags, ret = -1;
@@ -571,8 +570,8 @@ static int the_pre_openat_hook(struct kretprobe_instance *ri, struct pt_regs *th
 
     if (dirfd >= 0)
     {
-        ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
-        if (ret < 0)
+        ret = reconstruct_complete_path(files_fdtable(current->files)->fd[dirfd]->f_path, buf, PATH_MAX);
+        if (ret)
             goto out_free_buf;
     }
 
@@ -586,6 +585,18 @@ static int the_pre_openat_hook(struct kretprobe_instance *ri, struct pt_regs *th
 
     // copy pathname from buf
     memcpy(target_path, buf, strlen(buf) + 1);
+
+    ret = kern_path(target_path, LOOKUP_FOLLOW, &path);
+    if (ret)
+    {
+        // pr_err("%s: failed path lookup for %s with error %d\n", MODNAME, target_path, ret);
+        goto out_free_buf;
+    }
+    if (S_ISDIR(path.dentry->d_inode->i_mode))
+    {
+        ret = -1;
+        goto out_free_buf;
+    }
 
     if (check_path(target_path) != 0)
     {
@@ -623,20 +634,14 @@ static int the_pre_openat_hook(struct kretprobe_instance *ri, struct pt_regs *th
         goto out_free_exe;
     }
 
-    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = target_path;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
+    fill_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_pathname);
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
+    if (!schedule_work(&(the_log_work->the_work)))
+    {
+        ret = -1;
+        goto out_free_work;
+    }
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -661,8 +666,7 @@ out_free_buf:
 static int the_pre_openat2_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct timespec64 now;
-    struct tm tm_now;
+    struct path path;
     log_work *the_log_work;
     char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
     int dirfd, ret = -1;
@@ -696,8 +700,8 @@ static int the_pre_openat2_hook(struct kretprobe_instance *ri, struct pt_regs *t
 
     if (dirfd >= 0)
     {
-        ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
-        if (ret < 0)
+        ret = reconstruct_complete_path(files_fdtable(current->files)->fd[dirfd]->f_path, buf, PATH_MAX);
+        if (ret)
             goto out_free_buf;
     }
 
@@ -711,6 +715,18 @@ static int the_pre_openat2_hook(struct kretprobe_instance *ri, struct pt_regs *t
 
     // copy pathname from buf
     memcpy(target_path, buf, strlen(buf) + 1);
+
+    ret = kern_path(target_path, LOOKUP_FOLLOW, &path);
+    if (ret)
+    {
+        // pr_err("%s: failed path lookup for %s with error %d\n", MODNAME, target_path, ret);
+        goto out_free_buf;
+    }
+    if (S_ISDIR(path.dentry->d_inode->i_mode))
+    {
+        ret = -1;
+        goto out_free_buf;
+    }
 
     if (check_path(target_path) != 0)
     {
@@ -748,20 +764,14 @@ static int the_pre_openat2_hook(struct kretprobe_instance *ri, struct pt_regs *t
         goto out_free_exe;
     }
 
-    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = target_path;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
+    fill_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_pathname);
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
+    if (!schedule_work(&(the_log_work->the_work)))
+    {
+        ret = -1;
+        goto out_free_work;
+    }
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -786,8 +796,6 @@ out_free_buf:
 static int the_pre_renameat_hook(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct timespec64 now;
-    struct tm tm_now;
     log_work *the_log_work;
     char *target_path, *exe_pathname, *exe_pathname_buf, *buf;
     int dirfd, ret = -1;
@@ -796,6 +804,8 @@ static int the_pre_renameat_hook(struct kretprobe_instance *ri, struct pt_regs *
         return -1;
 
     get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    dirfd = regs->di;
 
     buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
     if (!buf)
@@ -811,12 +821,12 @@ static int the_pre_renameat_hook(struct kretprobe_instance *ri, struct pt_regs *
         goto out_free_buf;
     }
 
-    dirfd = regs->di;
+    // pr_info("dirfd %d name %s", dirfd, buf);
 
     if (dirfd >= 0)
     {
-        ret = reconstruct_complete_path(dirfd, buf, PATH_MAX);
-        if (ret < 0)
+        ret = reconstruct_complete_path(files_fdtable(current->files)->fd[dirfd]->f_path, buf, PATH_MAX);
+        if (ret)
             goto out_free_buf;
     }
 
@@ -831,7 +841,7 @@ static int the_pre_renameat_hook(struct kretprobe_instance *ri, struct pt_regs *
     // copy pathname from buf
     memcpy(target_path, buf, strlen(buf) + 1);
 
-    if (check_path(target_path) != 0)
+    if (check_path_and_dir(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
@@ -867,20 +877,14 @@ static int the_pre_renameat_hook(struct kretprobe_instance *ri, struct pt_regs *
         goto out_free_exe;
     }
 
-    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = target_path;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
+    fill_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_pathname);
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
+    if (!schedule_work(&(the_log_work->the_work)))
+    {
+        ret = -1;
+        goto out_free_work;
+    }
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -906,11 +910,12 @@ out_free_buf:
 static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
+    struct path path;
     log_work *the_log_work;
-    struct timespec64 now;
-    struct tm tm_now;
-    char *pathname, *exe_pathname, *exe_pathname_buf, *buf;
+    char *target_path, *target_path_buf, *exe_pathname, *exe_pathname_buf, *buf;
     int ret = -1;
+    unsigned int lookup_flags = 0;
+    lookup_flags |= LOOKUP_FOLLOW;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         return -1;
@@ -924,32 +929,58 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
 
     get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
 
-    // copy pathname from user space
-    ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
-    if (ret < 0)
+    if (((const char __user *)regs->di)[0] != '/') // relative path
     {
-        pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
-        goto out_free_buf;
+        ret = user_path_at(AT_FDCWD, (const char __user *)regs->di, lookup_flags, &path);
+        if (ret)
+            goto out_free_buf;
+
+        target_path_buf = d_path(&path, buf, PATH_MAX);
+        if (IS_ERR(target_path_buf))
+        {
+            ret = -PTR_ERR(target_path_buf);
+            goto out_free_buf;
+        }
+
+        target_path = (char *)kmalloc(strlen(target_path_buf) + 1, GFP_ATOMIC);
+        if (!target_path)
+        {
+            pr_err("%s: failed memory allocation for pathname\n", MODNAME);
+            ret = -ENOMEM;
+            goto out_free_buf;
+        }
+
+        memcpy(target_path, target_path_buf, strlen(target_path_buf) + 1);
+    }
+    else // absolute path
+    {
+        // copy pathname from user space
+        ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
+        if (ret < 0)
+        {
+            pr_err("%s: %s failed to copy pathname from user space with error %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
+            goto out_free_buf;
+        }
+
+        target_path = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
+        if (!target_path)
+        {
+            pr_err("%s: failed memory allocation for pathname\n", MODNAME);
+            ret = -ENOMEM;
+            goto out_free_buf;
+        }
+
+        // copy pathname from buf
+        memcpy(target_path, buf, strlen(buf) + 1);
     }
 
-    pathname = (char *)kmalloc(strlen(buf) + 1, GFP_ATOMIC);
-    if (!pathname)
-    {
-        pr_err("%s: failed memory allocation for pathname\n", MODNAME);
-        ret = -ENOMEM;
-        goto out_free_buf;
-    }
-
-    // copy pathname from buf
-    memcpy(pathname, buf, strlen(buf) + 1);
-
-    if (check_path(pathname) != 0)
+    if (check_path_and_dir(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
     }
     regs->di = (unsigned long)NULL;
-    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, pathname);
+    pr_notice("%s: The %s target %s is a protected pathname.\n", MODNAME, ri->rph->rp->kp.symbol_name, target_path);
 
     // d_path for exe_pathname
     exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
@@ -979,20 +1010,14 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
         goto out_free_exe;
     }
 
-    the_log_work->target_func = ri->rph->rp->kp.symbol_name;
-    the_log_work->gid = current->cred->gid;
-    the_log_work->ttid = task_pid_vnr(current);
-    the_log_work->uid = current->cred->uid;
-    the_log_work->euid = current->cred->euid;
-    the_log_work->target_path = pathname;
-    the_log_work->exe_pathname = exe_pathname;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
+    fill_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_pathname);
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    schedule_work(&(the_log_work->the_work));
+    if (!schedule_work(&(the_log_work->the_work)))
+    {
+        ret = -1;
+        goto out_free_work;
+    }
 
     if (!try_module_get(THIS_MODULE))
     {
@@ -1008,7 +1033,7 @@ out_free_work:
 out_free_exe:
     kfree(exe_pathname);
 out_free_path:
-    kfree(pathname);
+    kfree(target_path);
 out_free_buf:
     kfree(buf);
     return ret;
@@ -1046,21 +1071,25 @@ int register_hooks(void)
     kretprobes[6].entry_handler = (kretprobe_handler_t)the_pre_renameat_hook;
     kretprobes[6].maxactive = -1;
 
-    kretprobes[7].kp.symbol_name = creat;
-    kretprobes[7].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[7].kp.symbol_name = renameat2;
+    kretprobes[7].entry_handler = (kretprobe_handler_t)the_pre_renameat_hook; // use the same hook as renameat
     kretprobes[7].maxactive = -1;
 
-    kretprobes[8].kp.symbol_name = rmdir;
+    kretprobes[8].kp.symbol_name = creat;
     kretprobes[8].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
     kretprobes[8].maxactive = -1;
+
+    kretprobes[9].kp.symbol_name = rmdir;
+    kretprobes[9].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[9].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)
     {
         ret = register_kretprobe(&kretprobes[i]);
-        if (ret == 0)
-            pr_info("%s: kretprobes %s register success\n", MODNAME, kretprobes[i].kp.symbol_name);
-        else
+        if (ret)
             pr_err("%s: kretprobes %s register failed, error %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
+        else
+            pr_info("%s: kretprobes %s register success\n", MODNAME, kretprobes[i].kp.symbol_name);
     }
 
     return ret;

@@ -180,6 +180,46 @@ int main(void)
         exit(EXIT_FAILURE);
     }
     printf("Test rmdir test_dir_absolute_path passed\n");
-    
+
+    // open
+
+    // open test_file_absolute_path O_WRONLY
+    ret = syscall(SYS_open, test_file_absolute_path, O_WRONLY);
+    if (ret > 0)
+    {
+        perror("Test open test_file_absolute_path O_WRONLY failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test open test_file_absolute_path O_WRONLY passed\n");
+
+    // open test_file_relative_path O_WRONLY
+    ret = syscall(SYS_open, test_file_relative_path, O_WRONLY);
+    if (ret > 0)
+    {
+        perror("Test open test_file_relative_path O_WRONLY failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test open test_file_relative_path O_WRONLY passed\n");
+
+    // open test_file_absolute_path O_RDONLY
+    ret = syscall(SYS_open, test_file_absolute_path, O_RDONLY);
+    if (ret < 0)
+    {
+        perror("Test open test_file_absolute_path O_RDONLY failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test open test_file_absolute_path O_RDONLY passed\n");
+    close(ret);
+
+    // open test_file_relative_path O_RDONLY
+    ret = syscall(SYS_open, test_file_relative_path, O_RDONLY);
+    if (ret < 0)
+    {
+        perror("Test open test_file_relative_path O_RDONLY failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test open test_file_relative_path O_RDONLY passed\n");
+    close(ret);
+
     return 0;
 }

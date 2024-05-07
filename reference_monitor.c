@@ -1,24 +1,19 @@
 #define EXPORT_SYMTAB
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/cdev.h>
-#include <linux/errno.h>
-#include <linux/device.h>
-#include <linux/mm.h>
-#include <linux/path.h>
-#include <linux/sched.h>
-#include <linux/version.h>
-#include <linux/vmalloc.h>
-#include <linux/syscalls.h>
-#include <linux/cred.h>
-#include <linux/init.h>
-#include <linux/timekeeping.h>
-#include <linux/time.h>
-#include <linux/minmax.h>
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
+#include <linux/cdev.h>
+#include <linux/cred.h>
+#include <linux/device.h>
 #include <linux/genhd.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
+#include <linux/syscalls.h>
+#include <linux/time.h>
+#include <linux/timekeeping.h>
+#include <linux/version.h>
+#include <linux/vmalloc.h>
 
 #include "lib/include/scth.h"
 #include "reference_monitor.h"
@@ -203,14 +198,10 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 
 __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __user *, path, int, mode)
 {
-        struct path path_struct;
+        struct path _path;
         long copied;
         int ret = 0;
-        unsigned int lookup_flags = 0;
         char passwd_buf[PASSWORD_MAX_LEN + 1];
-        char *path_buf;
-        const char *absolute_path;
-        lookup_flags |= LOOKUP_FOLLOW;
 
         pr_info("%s: _edit_paths called.\n", MODNAME);
 
@@ -231,7 +222,7 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
                 pr_notice("%s: invalid monitor state.\n", MODNAME);
                 return -1;
         }
-        
+
         copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN + 1);
         if (copied < 0)
         {
@@ -247,43 +238,34 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
 
         if (path[0] != '/') // relative path
         {
-                path_buf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
-                if (!path_buf)
-                {
-                        pr_err("%s: kmalloc failing for path buffer\n", MODNAME);
-                        return -ENOMEM;
-                }
-                ret = user_path_at(AT_FDCWD, path, lookup_flags, &path_struct);
+
+                ret = user_path_at(AT_FDCWD, path, LOOKUP_FOLLOW, &_path);
                 if (ret)
-                        goto out;
-                absolute_path = d_path(&path_struct, path_buf, PATH_MAX);
-                if (IS_ERR(absolute_path))
                 {
-                        ret = -PTR_ERR(absolute_path);
-                        goto out;
+                        pr_err("%s: cannot resolving path\n", MODNAME);
+                        return ret;
                 }
         }
         else // absolute path
         {
-                if (kern_path(path, LOOKUP_FOLLOW, &path_struct) < 0)
+                ret = kern_path(path, LOOKUP_FOLLOW, &_path);
+                if (ret)
                 {
                         pr_err("%s: cannot resolving path\n", MODNAME);
-                        return -ENOENT;
+                        return ret;
                 }
-                absolute_path = path;
         }
 
         if (mode == ADD)
-                ret = add_path(absolute_path);
+                ret = add_path(&_path);
         else
-                ret = remove_path(absolute_path);
+                ret = remove_path(&_path);
 
         if (!ret)
                 print_paths();
+        else
+                path_put(&_path);
 
-out:
-        if (path_buf)
-                kfree(path_buf);
         return ret;
 }
 
@@ -490,7 +472,7 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
 
         if (unlikely(IS_ERR(ret)))
         {
-                pr_err("%s: error mounting logfilefs", MODNAME);
+                pr_err("%s: error mounting logfilefs\n", MODNAME);
                 goto out;
         }
         else
@@ -498,7 +480,10 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
 
         err = logfilefs_init_inode();
         if (err < 0)
+        {
+                pr_err("%s: logfilefs init inode failed - err %d\n", MODNAME, err);
                 ret = ERR_PTR(err);
+        }
 
         release_lock();
 

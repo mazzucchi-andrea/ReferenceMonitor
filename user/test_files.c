@@ -8,20 +8,25 @@
 #include <sys/syscall.h>
 #include <linux/openat2.h>
 
-char *saved_password = "the_password";
-char *test_file_path = "./test.txt";
-char *test_file_path_rename = "/home/zyler/ReferenceMonitor/user/parent_dir/test_rename.txt";
-char *test_dir_path = "/home/zyler/ReferenceMonitor/user/parent_dir/test_dir";
-char *test_dir_path_rename = "/home/zyler/ReferenceMonitor/user/parent_dir/test_rename_dir";
-char *test_filename = "test.txt";
-char *test_dir_name = "test_dir";
 char *parent_dir_path = "/home/zyler/ReferenceMonitor/user/parent_dir";
+
+// test file
+char *test_file_relative_path = "./parent_dir/test.txt";
+char *test_file_absolute_path = "/home/zyler/ReferenceMonitor/user/parent_dir/test.txt";
+char *test_file_relative_path_rename = "./parent_dir/test_rename.txt";
+char *test_file_absolute_path_rename = "/home/zyler/ReferenceMonitor/user/parent_dir/test_rename.txt";
+char *test_file_name = "test.txt";
+
+// test dir
+char *test_dir_relative_path = "./parent_dir/test_dir";
+char *test_dir_absolute_path = "/home/zyler/ReferenceMonitor/user/parent_dir/test_dir";
+char *test_dir_relative_path_rename = "./parent_dir/test_rename_dir";
+char *test_dir_absolute_path_rename = "/home/zyler/ReferenceMonitor/user/parent_dir/test_rename_dir";
+char *test_dir_name = "test_dir";
 
 int main(void)
 {
     int dirfd, ret;
-    //mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-    struct open_how how;
 
     dirfd = open(parent_dir_path, O_RDONLY);
     if (dirfd < 0)
@@ -30,166 +35,151 @@ int main(void)
         return dirfd;
     }
 
-    printf("Test test_file_path test_dir_path\n");
+    // unlink
 
-    // unlink test_file_path
-    if (unlink(test_file_path) == 0)
+    // unlink test_file_relative_path
+    ret = unlink(test_file_relative_path);
+    if (!ret)
     {
-        perror("Test unlink test_file_path failed");
+        perror("Test unlink test_file_relative_path failed");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlink test_file_path passed\n");
+    printf("Test unlink test_file_relative_path passed: ret %d, errno %d\n", ret, errno);
 
-    // unlinkat AT_FDCWD test_file_path 0
-    if (unlinkat(AT_FDCWD, test_file_path, 0) == 0)
+    // unlink test_file_absolute_path
+    ret = unlink(test_file_absolute_path);
+    if (!ret)
     {
-        perror("Test unlinkat AT_FDCWD test_file_path 0 failed");
+        perror("Test unlink test_file_absolute_path failed");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat AT_FDCWD test_file_path 0 passed\n");
+    printf("Test unlink test_file_absolute_path passed: ret %d, errno %d\n", ret, errno);
 
-    // unlinkat AT_FDCWD test_dir_path AT_REMOVEDIR
-    if (unlinkat(AT_FDCWD, test_dir_path, AT_REMOVEDIR) == 0)
+    // unlinkat
+
+    // unlinkat AT_FDCWD test_file_absolute_path 0
+    if (!unlinkat(AT_FDCWD, test_file_absolute_path, 0))
     {
-        perror("Test unlinkat AT_FDCWD test_dir_path AT_REMOVEDIR failed");
+        perror("Test unlinkat AT_FDCWD test_file_absolute_path 0 failed");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat AT_FDCWD test_dir_path AT_REMOVEDIR passed\n");
+    printf("Test unlinkat AT_FDCWD test_dir_absolute_path 0 passed\n");
+
+    // unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR
+    if (!unlinkat(AT_FDCWD, test_dir_absolute_path, AT_REMOVEDIR))
+    {
+        perror("Test unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR passed\n");
 
     // unlinkat dirfd test_filename 0
-    if (unlinkat(dirfd, test_filename, 0) == 0)
-{
+    if (!unlinkat(dirfd, test_file_name, 0))
+    {
         perror("Test unlinkat dirfd test_filename 0 failed");
         exit(EXIT_FAILURE);
     }
     printf("Test unlinkat dirfd test_filename 0 passed\n");
 
     // unlinkat dirfd test_dir_name AT_REMOVEDIR
-    if (unlinkat(dirfd, test_dir_name, AT_REMOVEDIR) == 0)
+    if (!unlinkat(dirfd, test_dir_name, AT_REMOVEDIR))
     {
         perror("Test unlinkat dirfd test_dir_name AT_REMOVEDIR failed");
         exit(EXIT_FAILURE);
     }
     printf("Test unlinkat dirfd test_dir_name AT_REMOVEDIR passed\n");
 
-    // rename test_file_path
-    if (rename(test_file_path, test_file_path_rename) == 0)
+    // rename
+
+    // rename test_file_absolute_path
+    if (!rename(test_file_absolute_path, test_file_absolute_path_rename))
     {
-        perror("Test rename test_file_path failed");
+        perror("Test rename test_file_absolute_path failed");
         exit(EXIT_FAILURE);
     }
-    printf("Test rename test_file_path passed\n");
+    printf("Test rename test_file_absolute_path passed\n");
 
-    // rename test_dir_path
-    if (rename(test_dir_path, test_dir_path_rename) == 0)
+    // rename test_file_relative_path
+    if (!rename(test_file_relative_path, test_file_relative_path_rename))
     {
-        perror("Test rename test_dir_path failed");
+        perror("Test rename test_file_relative_path failed");
         exit(EXIT_FAILURE);
     }
-    printf("Test rename test_dir_path passed\n");
+    printf("Test rename test_file_relative_path passed\n");
 
-    // renameat AT_FDCWD test_file_path AT_FDCWD
-    ret = renameat(AT_FDCWD, test_file_path, AT_FDCWD, "/home/zyler/parent_dir/test_rename.txt");
-    printf("renameat AT_FDCWD test_file_path returns %d\n", ret);
+    // rename test_dir_absolute_path
+    if (!rename(test_dir_absolute_path, test_dir_absolute_path_rename))
+    {
+        perror("Test rename test_dir_absolute_path failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test rename test_dir_absolute_path passed\n");
+
+    // rename test_dir_relative_path
+    if (!rename(test_dir_relative_path, test_dir_relative_path_rename))
+    {
+        perror("Test rename test_dir_relative_path failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test rename test_dir_relative_path passed\n");
+
+    // renemeat
+
+    // renameat AT_FDCWD test_file_absolute_path
+    ret = renameat(AT_FDCWD, test_file_absolute_path, AT_FDCWD, test_file_absolute_path_rename);
+    if (!ret)
+    {
+        perror("Test renameat AT_FDCWD test_file_absolute_path failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test renameat AT_FDCWD test_file_absolute_path passed\n");
 
     // renameat AT_FDCWD test_dir_path
-    ret = renameat(AT_FDCWD, test_dir_path, AT_FDCWD, "/home/zyler/parent_dir/test_dir_rename");
-    printf("renameat AT_FDCWD test_dir_path returns %d\n", ret);
+    ret = renameat(AT_FDCWD, test_dir_relative_path, AT_FDCWD, "/home/zyler/parent_dir/test_dir_rename");
+    if (!ret)
+    {
+        perror("Test renameat AT_FDCWD test_dir_path failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test renameat AT_FDCWD test_dir_path passed\n");
 
-    // renameat dirfd test_filename AT_FDCWD
-    ret = renameat(dirfd, test_filename, AT_FDCWD, "/home/zyler/parent_dir/test_rename.txt");
-    printf("renameat dirfd test_filename AT_FDCWD returns %d\n", ret);
+    // renameat dirfd test_filename
+    ret = renameat(dirfd, test_file_name, AT_FDCWD, test_file_absolute_path_rename);
+    if (!ret)
+    {
+        perror("Test renameat dirfd test_filename failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test renameat dirfd test_filename passed\n");
 
-    // renameat dirfd test_dir_path
-    ret = renameat(dirfd, test_dir_name, AT_FDCWD, "/home/zyler/parent_dir/test_dir_rename");
-    printf("renameat AT_FDCWD test_file_path returns %d\n", ret);
+    // renameat dirfd test_dir_name
+    ret = renameat(dirfd, test_dir_name, AT_FDCWD, test_dir_absolute_path_rename);
+    if (!ret)
+    {
+        perror("Test renameat dirfd test_dir_name failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test renameat dirfd test_dir_name passed\n");
 
-    // open test_file_path O_RDONLY
-    ret = syscall(SYS_open, test_file_path, O_RDONLY);
-    printf("open test_file_path O_RDONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
+    // rmdir
 
-    // open test_file_path O_WRONLY
-    ret = syscall(SYS_open, test_file_path, O_WRONLY);
-    printf("open test_file_path O_WRONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
+    // rmdir test_dir_relative_path
+    ret = rmdir(test_dir_relative_path);
+    if (!ret)
+    {
+        perror("Test rmdir test_dir_relative_path failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test rmdir test_dir_relative_path passed\n");
 
-    // openat AT_FDCWD test_file_path O_RDONLY
-    ret = openat(AT_FDCWD, test_file_path, O_RDONLY);
-    printf("openat AT_FDCWD test_file_path O_RDONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat AT_FDCWD test_file_path O_WRONLY
-    ret = openat(AT_FDCWD, test_file_path, O_WRONLY);
-    printf("openat AT_FDCWD test_file_path O_WRONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat AT_FDCWD test_dir_path O_RDONLY
-    ret = openat(AT_FDCWD, test_dir_path, O_RDONLY);
-    printf("openat AT_FDCWD test_dir_path O_RDONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat AT_FDCWD test_dir_path O_WRONLY
-    ret = openat(AT_FDCWD, test_dir_path, O_WRONLY);
-    printf("openat AT_FDCWD test_dir_path O_WRONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat dirfd test_filename O_RDONLY
-    ret = openat(dirfd, test_filename, O_RDONLY);
-    printf("openat dirfd test_filename O_RDONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat dirfd test_filename O_WRONLY
-    ret = openat(dirfd, test_filename, O_WRONLY);
-    printf("openat dirfd test_filename O_WRONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat dirfd test_dir_name O_RDONLY
-    ret = openat(dirfd, test_dir_name, O_RDONLY);
-    printf("openat dirfd test_dir_name O_RDONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    // openat dirfd test_dir_name O_WRONLY
-    ret = openat(dirfd, test_dir_name, O_WRONLY);
-    printf("openat dirfd test_dir_name O_WRONLY returns %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    how.flags = O_RDONLY;
-
-    ret = syscall(SYS_openat2, AT_FDCWD, test_file_path, how);
-    printf("openat2 with O_RDONLY return %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    ret = syscall(SYS_openat2, dirfd, test_filename, how);
-    printf("openat2 with O_RDONLY return %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    how.flags = O_WRONLY;
-
-    ret = syscall(SYS_openat2, AT_FDCWD, test_file_path, how);
-    printf("openat2 with O_WRONLY return %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    ret = syscall(SYS_openat2, dirfd, test_filename, how);
-    printf("openat2 with O_WRONLY return %d\n", ret);
-    if (ret > 0)
-        close(ret);
-
-    ret = rmdir(test_dir_path);
-    printf("rmdir test_dir_path returns %d\n", ret);
-
+    // rmdir test_dir_absolute_path
+    ret = rmdir(test_dir_absolute_path);
+    if (!ret)
+    {
+        perror("Test rmdir test_dir_absolute_path failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test rmdir test_dir_absolute_path passed\n");
+    
     return 0;
 }

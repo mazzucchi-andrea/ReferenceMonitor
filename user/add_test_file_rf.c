@@ -7,8 +7,8 @@
 #include <errno.h>
 
 const char *saved_password = "the_password";
-char *test_file_path = "/home/zyler/ReferenceMonitor/user/parent_dir/test.txt";
-char *test_dir_path = "/home/zyler/ReferenceMonitor/user/parent_dir/test_dir";
+char *test_file_path = "./parent_dir/test.txt";
+char *test_dir_relative_path = "./parent_dir/test_dir";
 
 
 int main() {
@@ -27,12 +27,12 @@ int main() {
     printf("%s added to Reference Monitor\n", test_file_path);
 
     // add test_dir_path to protected paths
-    if (syscall(174, saved_password, test_dir_path, 0) == -1)
+    if (syscall(174, saved_password, test_dir_relative_path, 0) == -1)
     {
         printf("edit_paths failed with error %d\n", errno);
         return -errno;
     }
-    printf("%s added to Reference Monitor\n", test_dir_path);
+    printf("%s added to Reference Monitor\n", test_dir_relative_path);
 
     return 0;
 }

@@ -12,10 +12,10 @@
 
 char *saved_password = "the_password";
 char *test_file_path = "/home/zyler/parent_dir/test.txt";
-char *test_filename = "test.txt";
+char *test_file_name = "test.txt";
 char *parent_dir_path = "/home/zyler/parent_dir";
 char *test_dir_name = "test_dir";
-char *test_dir_path = "/home/zyler/parent_dir/test_dir";
+char *test_dir_relative_path = "/home/zyler/parent_dir/test_dir";
 char *test_creat_path = "/home/zyler/parent_dir/creat.txt";
 
 int main(void)
@@ -43,13 +43,13 @@ int main(void)
     printf("%s added to Reference Monitor\n", test_file_path);
 
     // add test_dir_path to protected paths
-    ret = syscall(174, saved_password, test_dir_path, 0);
+    ret = syscall(174, saved_password, test_dir_relative_path, 0);
     if (ret < 0)
     {
         printf("edit_path failed with error %d\n", errno);
         return ret;
     }
-    printf("%s added to Reference Monitor\n", test_dir_path);
+    printf("%s added to Reference Monitor\n", test_dir_relative_path);
 
     // unlink test_file_path
     ret = unlink(test_file_path);
@@ -61,7 +61,7 @@ int main(void)
     printf("unlinkat test_file_path AT_FDCWD returns %d\n", ret);
 
     // unlinkat test_dir_path AT_FDCWD AT_REMOVEDIR
-    ret = unlinkat(AT_FDCWD, test_dir_path, AT_REMOVEDIR);
+    ret = unlinkat(AT_FDCWD, test_dir_relative_path, AT_REMOVEDIR);
     printf("unlinkat test_dir_path AT_FDCWD AT_REMOVEDIR returns %d\n", ret);
 
     // unlinkat dirfd test_dir_name AT_REMOVEDIR
@@ -69,7 +69,7 @@ int main(void)
     printf("unlinkat dirfd test_dir_name AT_REMOVEDIR returns %d\n", ret);
 
     // unlinkat dirfd test_filename
-    ret = unlinkat(dirfd, test_filename, 0);
+    ret = unlinkat(dirfd, test_file_name, 0);
     printf("unlinkat dirfd test_filename returns %d\n", ret);
 
     // rename test_file_path
@@ -77,7 +77,7 @@ int main(void)
     printf("rename test_file_path returns %d\n", ret);
 
     // rename test_dir_path
-    ret = rename(test_dir_path, "/home/zyler/tparent_dir/test_dir_rename");
+    ret = rename(test_dir_relative_path, "/home/zyler/tparent_dir/test_dir_rename");
     printf("rename test_file_path returns %d\n", ret);
 
     // renameat AT_FDCWD test_file_path AT_FDCWD
@@ -85,11 +85,11 @@ int main(void)
     printf("renameat AT_FDCWD test_file_path returns %d\n", ret);
 
     // renameat AT_FDCWD test_dir_path
-    ret = renameat(AT_FDCWD, test_dir_path, AT_FDCWD, "/home/zyler/parent_dir/test_dir_rename");
+    ret = renameat(AT_FDCWD, test_dir_relative_path, AT_FDCWD, "/home/zyler/parent_dir/test_dir_rename");
     printf("renameat AT_FDCWD test_dir_path returns %d\n", ret);
 
     // renameat dirfd test_filename AT_FDCWD
-    ret = renameat(dirfd, test_filename, AT_FDCWD, "/home/zyler/parent_dir/test_rename.txt");
+    ret = renameat(dirfd, test_file_name, AT_FDCWD, "/home/zyler/parent_dir/test_rename.txt");
     printf("renameat dirfd test_filename AT_FDCWD returns %d\n", ret);
 
     // renameat dirfd test_dir_path
@@ -121,25 +121,25 @@ int main(void)
         close(ret);
 
     // openat AT_FDCWD test_dir_path O_RDONLY
-    ret = openat(AT_FDCWD, test_dir_path, O_RDONLY);
+    ret = openat(AT_FDCWD, test_dir_relative_path, O_RDONLY);
     printf("openat AT_FDCWD test_dir_path O_RDONLY returns %d\n", ret);
     if (ret > 0)
         close(ret);
 
     // openat AT_FDCWD test_dir_path O_WRONLY
-    ret = openat(AT_FDCWD, test_dir_path, O_WRONLY);
+    ret = openat(AT_FDCWD, test_dir_relative_path, O_WRONLY);
     printf("openat AT_FDCWD test_dir_path O_WRONLY returns %d\n", ret);
     if (ret > 0)
         close(ret);
 
     // openat dirfd test_filename O_RDONLY
-    ret = openat(dirfd, test_filename, O_RDONLY);
+    ret = openat(dirfd, test_file_name, O_RDONLY);
     printf("openat dirfd test_filename O_RDONLY returns %d\n", ret);
     if (ret > 0)
         close(ret);
 
     // openat dirfd test_filename O_WRONLY
-    ret = openat(dirfd, test_filename, O_WRONLY);
+    ret = openat(dirfd, test_file_name, O_WRONLY);
     printf("openat dirfd test_filename O_WRONLY returns %d\n", ret);
     if (ret > 0)
         close(ret);
@@ -163,7 +163,7 @@ int main(void)
     if (ret > 0)
         close(ret);
 
-    ret = syscall(SYS_openat2, dirfd, test_filename, how);
+    ret = syscall(SYS_openat2, dirfd, test_file_name, how);
     printf("openat2 with O_RDONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
@@ -175,12 +175,12 @@ int main(void)
     if (ret > 0)
         close(ret);
 
-    ret = syscall(SYS_openat2, dirfd, test_filename, how);
+    ret = syscall(SYS_openat2, dirfd, test_file_name, how);
     printf("openat2 with O_WRONLY return %d\n", ret);
     if (ret > 0)
         close(ret);
 
-    ret = rmdir(test_dir_path);
+    ret = rmdir(test_dir_relative_path);
     printf("rmdir test_dir_path returns %d\n", ret);
 
     // remove paths
@@ -192,7 +192,7 @@ int main(void)
         return ret;
     }
 
-    ret = syscall(174, saved_password, test_dir_path, 1);
+    ret = syscall(174, saved_password, test_dir_relative_path, 1);
     if (ret < 0)
     {
         printf("edit_path failed with error %d\n", errno);
@@ -213,14 +213,14 @@ int main(void)
     ret = unlink(test_file_path);
     printf("Unlink test_file_path return %d\n", ret);
 
-    ret = unlink(test_dir_path);
+    ret = unlink(test_dir_relative_path);
     printf("Unlink test_file_path return %d\n", ret);
 
     ret = unlinkat(AT_FDCWD, test_file_path, 0);
     printf("Unlinkat test_file_path return %d\n", ret);
 
     // test unlinkat remove dir AT_FDCWD
-    ret = unlinkat(AT_FDCWD, test_dir_path, 0);
+    ret = unlinkat(AT_FDCWD, test_dir_relative_path, 0);
     printf("Unlinkat test_dir_path return %d\n", ret);
 
     // test unlinkat relative dir dir
@@ -228,7 +228,7 @@ int main(void)
     printf("Unlinkat test_dir_name return %d\n", ret);
 
     // test unlinkat relative dir file
-    ret = unlinkat(dirfd, test_filename, 0);
+    ret = unlinkat(dirfd, test_file_name, 0);
     printf("Unlinkat test_dir_name return %d\n", ret);
 
     ret = syscall(SYS_open, test_file_path, O_RDONLY);

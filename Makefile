@@ -30,3 +30,9 @@ mount-fs:
 
 unmount-fs:
 	umount ./mount/
+
+build:
+	make all create-fs
+
+rebuild:
+	make clean build

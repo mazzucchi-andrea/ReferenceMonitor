@@ -8,6 +8,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/workqueue.h>
 
 #define MODNAME "REFERENCE_MONITOR"
 
@@ -21,10 +22,9 @@
 #define REC_OFF 3
 
 extern int monitor_state;
+extern struct workqueue_struct *log_queue;
 
 bool is_mounted(void);
-void get_lock(void);
-void release_lock(void);
 ssize_t write_logfilefs(char*, size_t);
 
 #endif

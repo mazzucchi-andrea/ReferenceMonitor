@@ -2,7 +2,6 @@
 #include <linux/dcache.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
-#include <linux/workqueue.h>
 #include <linux/uidgid.h>
 
 #include "reference_monitor.h"
@@ -16,10 +15,11 @@
 #define creat "__x64_sys_creat"
 #define rmdir "__x64_sys_rmdir"
 #define open "__x64_sys_open"
+#define openat "__x64_sys_openat"
 
 #define calc_enoent "program attempting the illegal operation no longer exists"
 
-#define HOOKS 8
+#define HOOKS 9
 
 #define get(regs) regs = (struct pt_regs *)the_regs->di;
 
@@ -33,7 +33,7 @@ typedef struct _log_work
     kuid_t euid;
     const char *target_func;
     struct path *target_path;
-    char *exe_pathname;
+    struct path *exe_path;
 } log_work;
 
 // kretprobes
@@ -130,7 +130,7 @@ void logger(unsigned long data)
     log_work *work_data = container_of((void *)data, log_work, the_work);
     u8 checksum[SHA256_DIGEST_SIZE] = {0};
     int ret, len;
-    char *log_entry, *checksum_hex, *target_path, *buf;
+    char *log_entry, *checksum_hex, *target_pathname, *exe_pathname, *buf_target, *buf_exe;
     char *log_entry_base = "%d-%02d-%02d\t%02d:%02d:%02d\t%s\n"
                            "gid:\t%d\n"
                            "ttid:\t%d\n"
@@ -140,26 +140,38 @@ void logger(unsigned long data)
                            "exe_file:\t%s\n"
                            "%s\n";
 
-    get_lock(); // get write lock
-
     if (!is_mounted())
     {
         pr_info("%s: The logfilefs is not mounted\n", MODNAME);
-        goto out_lock;
+        goto out_work;
     }
 
-    buf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
-    if (!buf)
+    buf_target = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
+    if (!buf_target)
     {
         pr_err("%s: failed memory allocation for buffer\n", MODNAME);
-        goto out_lock;
+        goto out_work;
     }
 
-    target_path = d_path(work_data->target_path, buf, PATH_MAX);
-    if (IS_ERR(target_path))
+    target_pathname = d_path(work_data->target_path, buf_target, PATH_MAX);
+    if (IS_ERR(target_pathname))
     {
-        pr_err("%s: target Path resolve failed - err %ld\n", MODNAME, -PTR_ERR(target_path));
-        goto out_free_buf;
+        pr_err("%s: target pathname resolve failed - err %ld\n", MODNAME, PTR_ERR(target_pathname));
+        goto out_free_buf_target;
+    }
+
+    buf_exe = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
+    if (!buf_exe)
+    {
+        pr_err("%s: failed memory allocation for buffer\n", MODNAME);
+        goto out_free_buf_target;
+    }
+
+    exe_pathname = d_path(work_data->exe_path, buf_exe, PATH_MAX);
+    if (IS_ERR(exe_pathname))
+    {
+        pr_err("%s: exe pathname resolve failed - err %ld\n", MODNAME, PTR_ERR(exe_pathname));
+        exe_pathname = NULL;
     }
 
     checksum_hex = (char *)kmalloc(SHA256_DIGEST_SIZE * 2 + 1, GFP_KERNEL);
@@ -169,7 +181,7 @@ void logger(unsigned long data)
         goto skip_checksum;
     }
 
-    ret = calculate_checksum(work_data->exe_pathname, checksum);
+    ret = calculate_checksum(exe_pathname, checksum);
     if (ret)
         pr_err("%s: failing calculate file checksum - err %d\n", MODNAME, ret);
 
@@ -196,8 +208,8 @@ skip_checksum:
                    work_data->ttid,
                    work_data->uid,
                    work_data->euid,
-                   target_path,
-                   work_data->exe_pathname,
+                   target_pathname,
+                   exe_pathname,
                    checksum_hex);
     if (len < 0)
     {
@@ -225,8 +237,8 @@ skip_checksum:
                    work_data->ttid,
                    work_data->uid,
                    work_data->euid,
-                   target_path,
-                   work_data->exe_pathname,
+                   target_pathname,
+                   exe_pathname,
                    checksum_hex);
     if (ret < 0)
     {
@@ -245,18 +257,19 @@ out:
 out_hex:
     if (checksum_hex)
         kfree(checksum_hex);
-out_free_buf:
-    kfree(buf);
-out_lock:
-    release_lock();
+    kfree(buf_exe);
+out_free_buf_target:
+    kfree(buf_target);
+out_work:
     path_put(work_data->target_path);
     kfree(work_data->target_path);
-    kfree(work_data->exe_pathname);
+    path_put(work_data->exe_path);
+    kfree(work_data->exe_path);
     kfree(work_data);
     module_put(THIS_MODULE);
 }
 
-int schedule_log_work(log_work *the_log_work, const char *target_func, struct path *target_path, char *exe_pathname)
+int schedule_log_work(log_work *the_log_work, const char *target_func, struct path *target_path, struct path *exe_path)
 {
     struct timespec64 now;
     struct tm tm_now;
@@ -267,14 +280,14 @@ int schedule_log_work(log_work *the_log_work, const char *target_func, struct pa
     the_log_work->uid = current->cred->uid;
     the_log_work->euid = current->cred->euid;
     the_log_work->target_path = target_path;
-    the_log_work->exe_pathname = exe_pathname;
+    the_log_work->exe_path = exe_path;
 
     ktime_get_real_ts64(&now);
     time64_to_tm(now.tv_sec, 0, &tm_now);
     the_log_work->tm_violation = tm_now;
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
-    if (!schedule_work(&(the_log_work->the_work)))
+    if (!queue_work(log_queue, &(the_log_work->the_work)))
         return -1;
 
     if (!try_module_get(THIS_MODULE))
@@ -287,12 +300,10 @@ int schedule_log_work(log_work *the_log_work, const char *target_func, struct pa
 static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct path *path;
+    struct path *target_path, *exe_path;
     log_work *the_log_work;
-    char *exe_pathname, *exe_pathname_buf, *buf;
+    char *buf;
     int ret = -1;
-
-    preempt_disable();
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         goto out;
@@ -315,8 +326,8 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
         goto out_free_buf;
     }
 
-    path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
-    if (!path)
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
         ret = -ENOMEM;
@@ -325,7 +336,7 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
 
     if (buf[0] != '/') // relative path
     {
-        ret = user_path_at(AT_FDCWD, (const char __user *)regs->di, LOOKUP_FOLLOW, path);
+        ret = user_path_at(AT_FDCWD, (const char __user *)regs->di, LOOKUP_FOLLOW, target_path);
         if (ret == -ENOENT || ret == -EFAULT)
             goto out_free_path;
         else if (ret)
@@ -337,7 +348,7 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
     }
     else // absolute path
     {
-        ret = kern_path(buf, LOOKUP_FOLLOW, path);
+        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
         if (ret == -ENOENT)
             goto out_free_path;
         else if (ret)
@@ -348,39 +359,24 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
         }
     }
 
-    if (check_path_or_parent_dir(path))
+    if (check_path_or_parent_dir(target_path))
     {
         ret = -1;
         goto out_free_path;
     }
     regs->di = (unsigned long)NULL;
 
-    // d_path for exe_pathname
-    exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
-    if (!IS_ERR(exe_pathname_buf))
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
     {
-        exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
-        if (!exe_pathname)
-        {
-            pr_err("%s: %s failed memory allocation for exe_pathname\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
-            goto out_free_path;
-        }
-        // copy exe_pathname from buf
-        memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
     }
-    else
-    {
-        pr_err("%s: %s cannot resolving exe pathname - err %ld\n", MODNAME, ri->rph->rp->kp.symbol_name, PTR_ERR(exe_pathname_buf));
-        exe_pathname = (char *)kzalloc(1, GFP_ATOMIC);
-        if (!exe_pathname)
-        {
-            pr_err("%s: %s failed memory allocation for exe_pathname\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
-            goto out_free_path;
-        }
-    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
 
+log_work:
     // prepare log_work
     the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
     if (!the_log_work)
@@ -390,7 +386,7 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, path, exe_pathname);
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
     if (ret)
     {
         pr_err("%s: failing schedule log work\n", MODNAME);
@@ -403,14 +399,14 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
 out_free_work:
     kfree(the_log_work);
 out_free_exe:
-    kfree(exe_pathname);
+    path_put(exe_path);
+    kfree(exe_path);
 out_free_path:
-    path_put(path);
-    kfree(path);
+    path_put(target_path);
+    kfree(target_path);
 out_free_buf:
     kfree(buf);
 out:
-    preempt_enable();
     return ret;
 }
 
@@ -418,12 +414,10 @@ out:
 static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct path *path;
+    struct path *target_path, *exe_path;
     log_work *the_log_work;
-    char *exe_pathname, *exe_pathname_buf, *buf;
+    char *buf;
     int dirfd, ret = -1;
-
-    preempt_disable();
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         goto out;
@@ -446,8 +440,8 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
         goto out_free_buf;
     }
 
-    path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
-    if (!path)
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
         ret = -ENOMEM;
@@ -458,7 +452,7 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
 
     if (buf[0] != '/') // relative path
     {
-        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, path);
+        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
         if (ret == -ENOENT || ret == -EFAULT)
             goto out_free_path;
         else if (ret)
@@ -470,7 +464,7 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
     }
     else // absolute path
     {
-        ret = kern_path(buf, LOOKUP_FOLLOW, path);
+        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
         if (ret == -ENOENT)
             goto out_free_path;
         else if (ret)
@@ -481,39 +475,24 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
         }
     }
 
-    if (check_path_or_parent_dir(path) != 0)
+    if (check_path_or_parent_dir(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
     }
     regs->si = (unsigned long)NULL;
 
-    // d_path for exe_pathname
-    exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
-    if (!IS_ERR(exe_pathname_buf))
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
     {
-        exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
-        if (!exe_pathname)
-        {
-            pr_err("%s: %s failed memory allocation for exe_pathname\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
-            goto out_free_path;
-        }
-        // copy exe_pathname from buf
-        memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
     }
-    else
-    {
-        pr_err("%s: %s cannot resolving exe pathname - err %ld\n", MODNAME, ri->rph->rp->kp.symbol_name, PTR_ERR(exe_pathname_buf));
-        exe_pathname = (char *)kzalloc(1, GFP_ATOMIC);
-        if (!exe_pathname)
-        {
-            pr_err("%s: %s failed memory allocation for exe_pathname\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
-            goto out_free_path;
-        }
-    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
 
+log_work:
     // prepare log_work
     the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
     if (!the_log_work)
@@ -523,7 +502,7 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, path, exe_pathname);
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
     if (ret)
         goto out_free_work;
 
@@ -533,26 +512,25 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
 out_free_work:
     kfree(the_log_work);
 out_free_exe:
-    kfree(exe_pathname);
+    path_put(exe_path);
+    kfree(exe_path);
 out_free_path:
-    kfree(path);
+    path_put(target_path);
+    kfree(target_path);
 out_free_buf:
     kfree(buf);
 out:
-    preempt_enable();
-    return ret;
+    return 0;
 }
 
 // pre handler for open syscall
 static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
-    struct path *path;
+    struct path *path, *exe_path;
     log_work *the_log_work;
-    char *exe_pathname, *exe_pathname_buf, *buf;
+    char *buf;
     int ret = -1;
-
-    preempt_disable();
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         goto out;
@@ -614,32 +592,17 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
     }
     regs->di = (unsigned long)NULL;
 
-    // d_path for exe_pathname
-    exe_pathname_buf = d_path(&current->mm->exe_file->f_path, buf, PATH_MAX);
-    if (!IS_ERR(exe_pathname_buf))
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
     {
-        exe_pathname = (char *)kmalloc(strlen(exe_pathname_buf) + 1, GFP_ATOMIC);
-        if (!exe_pathname)
-        {
-            pr_err("%s: %s failed memory allocation for exe_pathname\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
-            goto out_free_path;
-        }
-        // copy exe_pathname from buf
-        memcpy(exe_pathname, exe_pathname_buf, strlen(exe_pathname_buf) + 1);
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
     }
-    else
-    {
-        pr_err("%s: %s cannot resolving exe pathname - err %ld\n", MODNAME, ri->rph->rp->kp.symbol_name, PTR_ERR(exe_pathname_buf));
-        exe_pathname = (char *)kzalloc(1, GFP_ATOMIC);
-        if (!exe_pathname)
-        {
-            pr_err("%s: %s failed memory allocation for exe_pathname\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
-            goto out_free_path;
-        }
-    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
 
+log_work:
     // prepare log_work
     the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
     if (!the_log_work)
@@ -649,7 +612,7 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, path, exe_pathname);
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, path, exe_path);
     if (ret)
     {
         pr_err("%s: failing schedule log work\n", MODNAME);
@@ -662,14 +625,130 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
 out_free_work:
     kfree(the_log_work);
 out_free_exe:
-    kfree(exe_pathname);
+    path_put(exe_path);
+    kfree(exe_path);
 out_free_path:
     path_put(path);
     kfree(path);
 out_free_buf:
     kfree(buf);
 out:
-    preempt_enable();
+    return ret;
+}
+
+// pre handler for openat syscall
+static int the_pre_hook_openat(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+{
+    struct pt_regs *regs;
+    struct path *target_path, *exe_path;
+    log_work *the_log_work;
+    char *buf;
+    int dirfd, ret = -1;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        goto out;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    if (regs->dx == O_RDONLY)
+        goto out;
+
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buf)
+    {
+        pr_err("%s: %s failed memory allocation for buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // copy pathname from user space
+    ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
+    if (ret <= 0)
+    {
+        pr_err("%s: %s failed to copy pathname from user space - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
+        goto out_free_buf;
+    }
+
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out_free_buf;
+    }
+
+    dirfd = regs->di;
+
+    if (buf[0] != '/') // relative path
+    {
+        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
+        if (ret == -ENOENT || ret == -EFAULT)
+            goto out_free_path;
+        else if (ret)
+        {
+            pr_err("%s: %s cannot resolving target path %s - err %d\n",
+                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+            goto out_free_path;
+        }
+    }
+    else // absolute path
+    {
+        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
+        if (ret == -ENOENT)
+            goto out_free_path;
+        else if (ret)
+        {
+            pr_err("%s: %s cannot resolving target path %s with dirfd %d - err %d\n",
+                   MODNAME, ri->rph->rp->kp.symbol_name, buf, dirfd, ret);
+            goto out_free_path;
+        }
+    }
+
+    if (check_path(target_path) != 0)
+    {
+        ret = -1;
+        goto out_free_path;
+    }
+    regs->si = (unsigned long)NULL;
+
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
+    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
+
+log_work:
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    if (ret)
+        goto out_free_work;
+
+    ret = -1;
+    goto out_free_buf;
+
+out_free_work:
+    kfree(the_log_work);
+out_free_exe:
+    path_put(exe_path);
+    kfree(exe_path);
+out_free_path:
+    path_put(target_path);
+    kfree(target_path);
+out_free_buf:
+    kfree(buf);
+out:
     return ret;
 }
 
@@ -708,6 +787,10 @@ int register_hooks(void)
     kretprobes[7].kp.symbol_name = open;
     kretprobes[7].entry_handler = (kretprobe_handler_t)the_pre_hook_open;
     kretprobes[7].maxactive = -1;
+
+    kretprobes[8].kp.symbol_name = openat;
+    kretprobes[8].entry_handler = (kretprobe_handler_t)the_pre_hook_openat;
+    kretprobes[8].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)
     {

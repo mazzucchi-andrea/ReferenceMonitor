@@ -34,12 +34,13 @@ char *the_password;
 module_param(the_password, charp, 0);
 
 struct super_block *device_sb;
-DEFINE_MUTEX(device_mutex);
 
 unsigned long the_ni_syscall;
 unsigned long new_sys_call_array[] = {0x0, 0x0, 0x0};
 #define HACKED_ENTRIES (int)(sizeof(new_sys_call_array) / sizeof(unsigned long))
 int restore[HACKED_ENTRIES] = {[0 ...(HACKED_ENTRIES - 1)] - 1};
+
+struct workqueue_struct *log_queue;
 
 int hash_password(const char *password, size_t password_len, u8 *hash)
 {
@@ -410,12 +411,12 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
 
 static void logfilefs_kill_superblock(struct super_block *s)
 {
-        get_lock();
+        // get_lock();
 
         kill_block_super(s);
         pr_info("%s: logfilefs unmount succesful.\n", MODNAME);
 
-        release_lock();
+        // release_lock();
 
         return;
 }
@@ -466,14 +467,14 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
         struct dentry *ret;
         int err;
 
-        get_lock();
+        // get_lock();
 
         ret = mount_bdev(fs_type, flags, dev_name, data, logfilefs_fill_super);
 
         if (unlikely(IS_ERR(ret)))
         {
                 pr_err("%s: error mounting logfilefs\n", MODNAME);
-                goto out;
+                return ret;
         }
         else
                 pr_info("%s: logfilefs is succesfully mounted on from device %s\n", MODNAME, dev_name);
@@ -482,12 +483,11 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
         if (err < 0)
         {
                 pr_err("%s: logfilefs init inode failed - err %d\n", MODNAME, err);
-                ret = ERR_PTR(err);
+                return ERR_PTR(err);
         }
 
-        release_lock();
+        // release_lock();
 
-out:
         return ret;
 }
 
@@ -505,16 +505,6 @@ bool is_mounted(void)
         if (device_sb != NULL && device_sb->s_count != 0)
                 ret = true;
         return ret;
-}
-
-void get_lock(void)
-{
-        mutex_lock(&device_mutex);
-}
-
-void release_lock(void)
-{
-        mutex_unlock(&device_mutex);
 }
 
 void logfilefs_update_file_size(loff_t file_size)
@@ -678,9 +668,6 @@ int init_module(void)
                 pr_info("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
         }
 
-        // mutex init
-        mutex_init(&device_mutex);
-
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
@@ -690,6 +677,8 @@ int init_module(void)
                 pr_err("%s: failed to register logfilefs - error %d", MODNAME, ret);
                 return -1;
         }
+
+        log_queue = create_singlethread_workqueue("log_queue");
 
         // register hooks
         ret = register_hooks();
@@ -719,6 +708,8 @@ void cleanup_module(void)
                 pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
         else
                 pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
+
+        destroy_workqueue(log_queue);
 
         unregister_hooks();
         pr_info("%s: unregistered hooks\n", MODNAME);

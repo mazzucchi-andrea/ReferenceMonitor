@@ -41,7 +41,7 @@ int main(void)
     ret = unlink(test_file_relative_path);
     if (!ret)
     {
-        perror("Test unlink test_file_relative_path failed");
+        printf("Test unlink test_file_relative_path failed\n");
         exit(EXIT_FAILURE);
     }
     printf("Test unlink test_file_relative_path passed: ret %d, errno %d\n", ret, errno);
@@ -50,7 +50,7 @@ int main(void)
     ret = unlink(test_file_absolute_path);
     if (!ret)
     {
-        perror("Test unlink test_file_absolute_path failed");
+        printf("Test unlink test_file_absolute_path failed\n");
         exit(EXIT_FAILURE);
     }
     printf("Test unlink test_file_absolute_path passed: ret %d, errno %d\n", ret, errno);
@@ -60,68 +60,68 @@ int main(void)
     // unlinkat AT_FDCWD test_file_absolute_path 0
     if (!unlinkat(AT_FDCWD, test_file_absolute_path, 0))
     {
-        perror("Test unlinkat AT_FDCWD test_file_absolute_path 0 failed");
+        printf("Test unlinkat AT_FDCWD test_file_absolute_path 0 failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat AT_FDCWD test_dir_absolute_path 0 passed\n");
+    printf("Test unlinkat AT_FDCWD test_dir_absolute_path 0 passed: ret %d, errno %d\n", ret, errno);
 
     // unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR
     if (!unlinkat(AT_FDCWD, test_dir_absolute_path, AT_REMOVEDIR))
     {
-        perror("Test unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR failed");
+        printf("Test unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR passed\n");
+    printf("Test unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR passed: ret %d, errno %d\n", ret, errno);
 
     // unlinkat dirfd test_filename 0
     if (!unlinkat(dirfd, test_file_name, 0))
     {
-        perror("Test unlinkat dirfd test_filename 0 failed");
+        printf("Test unlinkat dirfd test_filename 0 failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat dirfd test_filename 0 passed\n");
+    printf("Test unlinkat dirfd test_filename 0 passed: ret %d, errno %d\n", ret, errno);
 
     // unlinkat dirfd test_dir_name AT_REMOVEDIR
     if (!unlinkat(dirfd, test_dir_name, AT_REMOVEDIR))
     {
-        perror("Test unlinkat dirfd test_dir_name AT_REMOVEDIR failed");
+        printf("Test unlinkat dirfd test_dir_name AT_REMOVEDIR failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat dirfd test_dir_name AT_REMOVEDIR passed\n");
+    printf("Test unlinkat dirfd test_dir_name AT_REMOVEDIR passed: ret %d, errno %d\n", ret, errno);
 
     // rename
 
     // rename test_file_absolute_path
     if (!rename(test_file_absolute_path, test_file_absolute_path_rename))
     {
-        perror("Test rename test_file_absolute_path failed");
+        printf("Test rename test_file_absolute_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test rename test_file_absolute_path passed\n");
+    printf("Test rename test_file_absolute_path passed: ret %d, errno %d\n", ret, errno);
 
     // rename test_file_relative_path
     if (!rename(test_file_relative_path, test_file_relative_path_rename))
     {
-        perror("Test rename test_file_relative_path failed");
+        printf("Test rename test_file_relative_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test rename test_file_relative_path passed\n");
+    printf("Test rename test_file_relative_path passed: ret %d, errno %d\n", ret, errno);
 
     // rename test_dir_absolute_path
     if (!rename(test_dir_absolute_path, test_dir_absolute_path_rename))
     {
-        perror("Test rename test_dir_absolute_path failed");
+        printf("Test rename test_dir_absolute_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test rename test_dir_absolute_path passed\n");
+    printf("Test rename test_dir_absolute_path passed: ret %d, errno %d\n", ret, errno);
 
     // rename test_dir_relative_path
     if (!rename(test_dir_relative_path, test_dir_relative_path_rename))
     {
-        perror("Test rename test_dir_relative_path failed");
+        printf("Test rename test_dir_relative_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test rename test_dir_relative_path passed\n");
+    printf("Test rename test_dir_relative_path passed: ret %d, errno %d\n", ret, errno);
 
     // renemeat
 
@@ -129,37 +129,37 @@ int main(void)
     ret = renameat(AT_FDCWD, test_file_absolute_path, AT_FDCWD, test_file_absolute_path_rename);
     if (!ret)
     {
-        perror("Test renameat AT_FDCWD test_file_absolute_path failed");
+        printf("Test renameat AT_FDCWD test_file_absolute_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test renameat AT_FDCWD test_file_absolute_path passed\n");
+    printf("Test renameat AT_FDCWD test_file_absolute_path passed: ret %d, errno %d\n", ret, errno);
 
     // renameat AT_FDCWD test_dir_path
     ret = renameat(AT_FDCWD, test_dir_relative_path, AT_FDCWD, "/home/zyler/parent_dir/test_dir_rename");
     if (!ret)
     {
-        perror("Test renameat AT_FDCWD test_dir_path failed");
+        printf("Test renameat AT_FDCWD test_dir_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test renameat AT_FDCWD test_dir_path passed\n");
+    printf("Test renameat AT_FDCWD test_dir_path passed: ret %d, errno %d\n", ret, errno);
 
     // renameat dirfd test_filename
     ret = renameat(dirfd, test_file_name, AT_FDCWD, test_file_absolute_path_rename);
     if (!ret)
     {
-        perror("Test renameat dirfd test_filename failed");
+        printf("Test renameat dirfd test_filename failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test renameat dirfd test_filename passed\n");
+    printf("Test renameat dirfd test_filename passed: ret %d, errno %d\n", ret, errno);
 
     // renameat dirfd test_dir_name
     ret = renameat(dirfd, test_dir_name, AT_FDCWD, test_dir_absolute_path_rename);
     if (!ret)
     {
-        perror("Test renameat dirfd test_dir_name failed");
+        printf("Test renameat dirfd test_dir_name failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test renameat dirfd test_dir_name passed\n");
+    printf("Test renameat dirfd test_dir_name passed: ret %d, errno %d\n", ret, errno);
 
     // rmdir
 
@@ -167,19 +167,19 @@ int main(void)
     ret = rmdir(test_dir_relative_path);
     if (!ret)
     {
-        perror("Test rmdir test_dir_relative_path failed");
+        printf("Test rmdir test_dir_relative_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test rmdir test_dir_relative_path passed\n");
+    printf("Test rmdir test_dir_relative_path passed: ret %d, errno %d\n", ret, errno);
 
     // rmdir test_dir_absolute_path
     ret = rmdir(test_dir_absolute_path);
     if (!ret)
     {
-        perror("Test rmdir test_dir_absolute_path failed");
+        printf("Test rmdir test_dir_absolute_path failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test rmdir test_dir_absolute_path passed\n");
+    printf("Test rmdir test_dir_absolute_path passed: ret %d, errno %d\n", ret, errno);
 
     // open
 
@@ -187,25 +187,25 @@ int main(void)
     ret = syscall(SYS_open, test_file_absolute_path, O_WRONLY);
     if (ret > 0)
     {
-        perror("Test open test_file_absolute_path O_WRONLY failed");
+        printf("Test open test_file_absolute_path O_WRONLY failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test open test_file_absolute_path O_WRONLY passed\n");
+    printf("Test open test_file_absolute_path O_WRONLY passed: ret %d, errno %d\n", ret, errno);
 
     // open test_file_relative_path O_WRONLY
     ret = syscall(SYS_open, test_file_relative_path, O_WRONLY);
     if (ret > 0)
     {
-        perror("Test open test_file_relative_path O_WRONLY failed");
+        printf("Test open test_file_relative_path O_WRONLY failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test open test_file_relative_path O_WRONLY passed\n");
+    printf("Test open test_file_relative_path O_WRONLY passed: ret %d, errno %d\n", ret, errno);
 
     // open test_file_absolute_path O_RDONLY
     ret = syscall(SYS_open, test_file_absolute_path, O_RDONLY);
     if (ret < 0)
     {
-        perror("Test open test_file_absolute_path O_RDONLY failed");
+        printf("Test open test_file_absolute_path O_RDONLY failed\n");
         exit(EXIT_FAILURE);
     }
     printf("Test open test_file_absolute_path O_RDONLY passed\n");
@@ -215,10 +215,88 @@ int main(void)
     ret = syscall(SYS_open, test_file_relative_path, O_RDONLY);
     if (ret < 0)
     {
-        perror("Test open test_file_relative_path O_RDONLY failed");
+        printf("Test open test_file_relative_path O_RDONLY failed\n");
         exit(EXIT_FAILURE);
     }
     printf("Test open test_file_relative_path O_RDONLY passed\n");
+    close(ret);
+
+    // openat
+
+    // openat AT_FDCWD test_file_absolute_path O_WRONLY
+    ret = openat(AT_FDCWD, test_file_absolute_path, O_WRONLY);
+    if (ret > 0)
+    {
+        printf("Test openat AT_FDCWD test_file_absolute_path O_WRONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat AT_FDCWD test_file_absolute_path O_WRONLY passed: ret %d, errno %d\n", ret, errno);
+
+    // openat AT_FDCWD test_dir_absolute_path O_WRONLY
+    ret = openat(AT_FDCWD, test_dir_absolute_path, O_WRONLY);
+    if (ret > 0)
+    {
+        printf("Test openat AT_FDCWD test_dir_absolute_path O_WRONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat AT_FDCWD test_dir_absolute_path O_WRONLY passed: ret %d, errno %d\n", ret, errno);
+
+    // openat dirfd test_file_name O_WRONLY
+    ret = openat(dirfd, test_file_name, O_WRONLY);
+    if (ret > 0)
+    {
+        printf("Test openat dirfd test_file_name O_WRONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat dirfd test_file_name O_WRONLY passed: ret %d, errno %d\n", ret, errno);
+
+    // openat dirfd test_dir_name O_WRONLY
+    ret = openat(dirfd, test_dir_name, O_WRONLY);
+    if (ret > 0)
+    {
+        printf("Test openat dirfd test_dir_name O_WRONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat dirfd test_dir_name O_WRONLY passed: ret %d, errno %d\n", ret, errno);
+
+    // openat AT_FDCWD test_file_absolute_path O_RDONLY
+    ret = openat(AT_FDCWD, test_file_absolute_path, O_RDONLY);
+    if (ret < 0)
+    {
+        printf("Test openat AT_FDCWD test_file_absolute_path O_RDONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat AT_FDCWD test_file_absolute_path O_RDONLY passed\n");
+    close(ret);
+
+    // openat AT_FDCWD test_dir_absolute_path O_RDONLY
+    ret = openat(AT_FDCWD, test_dir_absolute_path, O_RDONLY);
+    if (ret < 0)
+    {
+        printf("Test openat AT_FDCWD test_dir_absolute_path O_RDONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat AT_FDCWD test_dir_absolute_path O_RDONLY passed\n");
+    close(ret);
+
+    // openat dirfd test_file_name O_RDONLY
+    ret = openat(dirfd, test_file_name, O_RDONLY);
+    if (ret < 0)
+    {
+        printf("Test openat dirfd test_file_name O_RDONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat dirfd test_file_name O_RDONLY passed\n");
+    close(ret);
+
+    // openat dirfd test_dir_name O_RDONLY
+    ret = openat(dirfd, test_dir_name, O_RDONLY);
+    if (ret < 0)
+    {
+        printf("Test openat dirfd test_dir_name O_RDONLY failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test openat dirfd test_dir_name O_RDONLY passed\n");
     close(ret);
 
     return 0;

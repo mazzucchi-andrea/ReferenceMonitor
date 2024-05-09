@@ -59,4 +59,8 @@ user/test_syscall_no_root
 user/prepare_env_test
 user/parent_dir
 user/add_test_file_rf
+user/add_test_dir_rf
+user/remove_test_file_rf
+user/remove_test_dir_rf
 user/test_files
+user/test_dir

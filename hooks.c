@@ -305,53 +305,34 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
     struct pt_regs *regs;
     struct path *target_path, *exe_path;
     log_work *the_log_work;
-    char *buf;
     int ret = -1;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
-    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
-    if (!buf)
-    {
-        pr_err("%s: %s failed memory allocation for buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
-
-    // copy pathname from user space
-    ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
-    if (ret <= 0)
-    {
-        pr_err("%s: %s failed to copy pathname from user space - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
-        goto out_free_buf;
-    }
-
+        return -1;
+    
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
-        goto out_free_buf;
+        return -ENOMEM;
     }
 
-    ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
 
+    ret = kern_path((const char __user *)regs->di, LOOKUP_FOLLOW, target_path);
     if (ret == -ENOENT)
         goto out_free_path;
     if (ret)
     {
         pr_err("%s: %s cannot resolving target path %s - err %d\n",
-               MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+               MODNAME, ri->rph->rp->kp.symbol_name, (const char __user *)regs->di, ret);
         goto out_free_path;
     }
 
     if (check_path_or_parent_dir(target_path))
     {
         ret = -1;
-        goto out_free_path;
+        goto out_put_path;
     }
     regs->di = (unsigned long)NULL;
 
@@ -360,12 +341,11 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
         ret = -ENOMEM;
-        goto log_work;
+        goto out_put_path;
     }
     memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
     path_get(exe_path);
 
-log_work:
     // prepare log_work
     the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
     if (!the_log_work)
@@ -382,20 +362,17 @@ log_work:
         goto out_free_work;
     }
 
-    ret = -1;
-    goto out_free_buf;
+    return -1;
 
 out_free_work:
     kfree(the_log_work);
 out_free_exe:
     path_put(exe_path);
     kfree(exe_path);
-out_free_path:
+out_put_path:
     path_put(target_path);
+out_free_path:
     kfree(target_path);
-out_free_buf:
-    kfree(buf);
-out:
     return ret;
 }
 
@@ -442,7 +419,7 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
     if (buf[0] != '/') // relative path
         ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
     else // absolute path
-        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
+        ret = kern_path((const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
 
     if (ret == -ENOENT)
         goto out_free_path;
@@ -571,7 +548,6 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
         ret = -1;
         goto out_free_path;
     }
-    pr_notice("%s: %s path target %s is protected\n", MODNAME, ri->rph->rp->kp.symbol_name, buf);
     regs->di = (unsigned long)NULL;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
@@ -689,7 +665,6 @@ static int the_pre_hook_openat(struct kretprobe_instance *ri, struct pt_regs *th
         ret = -1;
         goto out_free_path;
     }
-    pr_notice("%s: %s path target %s is protected\n", MODNAME, ri->rph->rp->kp.symbol_name, buf);
     regs->si = (unsigned long)NULL;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
@@ -1047,7 +1022,7 @@ static int the_pre_hook_mkdirat(struct kretprobe_instance *ri, struct pt_regs *t
     if (check_path_or_parent_dir(target_path) != 0)
     {
         ret = -1;
-        goto out_free_path;
+        goto out_put_path;
     }
     regs->si = (unsigned long)NULL;
 
@@ -1081,8 +1056,11 @@ log_work:
 out_free_work:
     kfree(the_log_work);
 out_free_exe:
-    path_put(exe_path);
-    kfree(exe_path);
+    if (exe_path)
+    {
+        path_put(exe_path);
+        kfree(exe_path);
+    }
 out_put_path:
     path_put(target_path);
 out_free_path:

@@ -411,12 +411,9 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
 
 static void logfilefs_kill_superblock(struct super_block *s)
 {
-        // get_lock();
-
         kill_block_super(s);
         pr_info("%s: logfilefs unmount succesful.\n", MODNAME);
-
-        // release_lock();
+        device_sb = NULL;
 
         return;
 }
@@ -467,7 +464,6 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
         struct dentry *ret;
         int err;
 
-        // get_lock();
 
         ret = mount_bdev(fs_type, flags, dev_name, data, logfilefs_fill_super);
 
@@ -485,8 +481,6 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
                 pr_err("%s: logfilefs init inode failed - err %d\n", MODNAME, err);
                 return ERR_PTR(err);
         }
-
-        // release_lock();
 
         return ret;
 }

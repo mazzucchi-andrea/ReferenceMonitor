@@ -139,7 +139,7 @@ void logger(unsigned long data)
                            "ttid:\t%d\n"
                            "uid:\t%d\n"
                            "euid:\t%d\n"
-                           "target_file:%s\n"
+                           "target:\t%s\n"
                            "exe_file:\t%s\n"
                            "%s\n";
 
@@ -337,29 +337,15 @@ static int the_pre_hook_sys_first_arg(struct kretprobe_instance *ri, struct pt_r
         goto out_free_buf;
     }
 
-    if (buf[0] != '/') // relative path
+    ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
+
+    if (ret == -ENOENT)
+        goto out_free_path;
+    if (ret)
     {
-        ret = user_path_at(AT_FDCWD, (const char __user *)regs->di, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT || ret == -EFAULT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
-            goto out_free_path;
-        }
-    }
-    else // absolute path
-    {
-        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
-            goto out_free_path;
-        }
+        pr_err("%s: %s cannot resolving target path %s - err %d\n",
+               MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+        goto out_free_path;
     }
 
     if (check_path_or_parent_dir(target_path))
@@ -454,28 +440,17 @@ static int the_pre_hook_sys_at(struct kretprobe_instance *ri, struct pt_regs *th
     dirfd = regs->di;
 
     if (buf[0] != '/') // relative path
-    {
         ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT || ret == -EFAULT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
-            goto out_free_path;
-        }
-    }
     else // absolute path
-    {
         ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s with dirfd %d - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, dirfd, ret);
-            goto out_free_path;
-        }
+
+    if (ret == -ENOENT)
+        goto out_free_path;
+    if (ret)
+    {
+        pr_err("%s: %s cannot resolving target path %s - err %d\n",
+               MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+        goto out_free_path;
     }
 
     if (check_path_or_parent_dir(target_path) != 0)
@@ -532,15 +507,17 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
     struct pt_regs *regs;
     struct path *path, *exe_path;
     log_work *the_log_work;
-    char *buf;
-    int ret = -1;
+    char *buf, *last;
+    int flags, ret = -1;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
         goto out;
 
     get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
 
-    if (regs->si == O_RDONLY)
+    flags = regs->si;
+
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
         goto out;
 
     buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
@@ -567,10 +544,248 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
         goto out_free_buf;
     }
 
+    if (flags & O_CREAT)
+    {
+        last = strrchr(buf, '/');
+        if (!last) // filename
+            ret = kern_path(".", LOOKUP_FOLLOW, path);
+        else
+        {
+            *last = '\0';
+            ret = kern_path(buf, LOOKUP_FOLLOW, path);
+        }
+    }
+    else
+        ret = kern_path(buf, LOOKUP_FOLLOW, path);
+
+    if (ret == -ENOENT)
+        goto out_free_path;
+    if (ret)
+    {
+        pr_err("%s: %s cannot resolving target path %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+        goto out_free_path;
+    }
+
+    if (check_path(path))
+    {
+        ret = -1;
+        goto out_free_path;
+    }
+    pr_notice("%s: %s path target %s is protected\n", MODNAME, ri->rph->rp->kp.symbol_name, buf);
+    regs->di = (unsigned long)NULL;
+
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
+    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
+
+log_work:
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: %s failed memory allocation for log_work\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, path, exe_path);
+    if (ret)
+    {
+        pr_err("%s: failing schedule log work\n", MODNAME);
+        goto out_free_work;
+    }
+
+    ret = -1;
+    goto out_free_buf;
+
+out_free_work:
+    kfree(the_log_work);
+out_free_exe:
+    path_put(exe_path);
+    kfree(exe_path);
+out_free_path:
+    if (path)
+        path_put(path);
+    kfree(path);
+out_free_buf:
+    kfree(buf);
+out:
+    return ret;
+}
+
+// pre handler for openat syscall
+static int the_pre_hook_openat(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+{
+    struct pt_regs *regs;
+    struct path *target_path, *exe_path;
+    log_work *the_log_work;
+    char *buf;
+    int flags, dirfd, ret = -1;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        goto out;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    flags = regs->dx;
+
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
+        goto out;
+
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buf)
+    {
+        pr_err("%s: %s failed memory allocation for buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // copy pathname from user space
+    ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
+    if (ret == -EFAULT)
+        goto out_free_buf;
+    else if (ret <= 0)
+    {
+        pr_err("%s: %s failed to copy pathname from user space - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
+        goto out_free_buf;
+    }
+
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out_free_buf;
+    }
+
+    dirfd = regs->di;
+
     if (buf[0] != '/') // relative path
     {
-        ret = user_path_at(AT_FDCWD, (const char __user *)regs->di, LOOKUP_FOLLOW, path);
-        if (ret)
+        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
+        if (ret == -EFAULT)
+            goto out_free_path;
+    }
+    else // absolute path
+        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
+
+    if (ret == -ENOENT)
+        goto out_free_path;
+    else if (ret)
+    {
+        pr_err("%s: %s cannot resolving target path %s with dirfd %d - err %d\n",
+               MODNAME, ri->rph->rp->kp.symbol_name, buf, dirfd, ret);
+        goto out_free_path;
+    }
+
+    if (check_path(target_path))
+    {
+        ret = -1;
+        goto out_free_path;
+    }
+    pr_notice("%s: %s path target %s is protected\n", MODNAME, ri->rph->rp->kp.symbol_name, buf);
+    regs->si = (unsigned long)NULL;
+
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
+    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
+
+log_work:
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    if (ret)
+        goto out_free_work;
+
+    ret = -1;
+    goto out_free_buf;
+
+out_free_work:
+    kfree(the_log_work);
+out_free_exe:
+    path_put(exe_path);
+    kfree(exe_path);
+out_free_path:
+    if (target_path)
+        path_put(target_path);
+    kfree(target_path);
+out_free_buf:
+    kfree(buf);
+out:
+    return ret;
+}
+
+// pre handler for openat2 syscall
+static int the_pre_hook_openat2(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+{
+    struct pt_regs *regs;
+    struct path *target_path, *exe_path;
+    log_work *the_log_work;
+    char *buf;
+    int flags, dirfd, ret = -1;
+    struct open_how *how;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        goto out;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    how = (struct open_how *)regs->dx;
+    flags = how->flags;
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
+        goto out;
+
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buf)
+    {
+        pr_err("%s: %s failed memory allocation for buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // copy pathname from user space
+    ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
+    if (ret <= 0)
+    {
+        pr_err("%s: %s failed to copy pathname from user space - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
+        goto out_free_buf;
+    }
+
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out_free_buf;
+    }
+
+    dirfd = regs->di;
+
+    if (buf[0] != '/') // relative path
+    {
+        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
+        if (ret == -ENOENT || ret == -EFAULT)
+            goto out_free_path;
+        else if (ret)
         {
             pr_err("%s: %s cannot resolving target path %s - err %d\n",
                    MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
@@ -579,13 +794,119 @@ static int the_pre_hook_open(struct kretprobe_instance *ri, struct pt_regs *the_
     }
     else // absolute path
     {
-        ret = kern_path((const char __user *)regs->di, LOOKUP_FOLLOW, path);
-        if (ret)
+        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
+        if (ret == -ENOENT)
+            goto out_free_path;
+        else if (ret)
         {
-            pr_err("%s: %s cannot resolving target path %s - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+            pr_err("%s: %s cannot resolving target path %s with dirfd %d - err %d\n",
+                   MODNAME, ri->rph->rp->kp.symbol_name, buf, dirfd, ret);
             goto out_free_path;
         }
+    }
+
+    if (check_path(target_path))
+    {
+        ret = -1;
+        goto out_free_path;
+    }
+    regs->si = (unsigned long)NULL;
+
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto log_work;
+    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
+
+log_work:
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    if (ret)
+        goto out_free_work;
+
+    ret = -1;
+    goto out_free_buf;
+
+out_free_work:
+    kfree(the_log_work);
+out_free_exe:
+    path_put(exe_path);
+    kfree(exe_path);
+out_free_path:
+    if (target_path)
+        path_put(target_path);
+    kfree(target_path);
+out_free_buf:
+    kfree(buf);
+out:
+    return ret;
+}
+
+// pre handler for creat syscall
+static int the_pre_hook_creat(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+{
+    struct pt_regs *regs;
+    struct path *path, *exe_path;
+    log_work *the_log_work;
+    char *buf, *last;
+    int ret = -1;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        goto out;
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
+
+    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buf)
+    {
+        pr_err("%s: %s failed memory allocation for buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // copy pathname from user space
+    ret = strncpy_from_user(buf, (const char __user *)regs->di, PATH_MAX);
+    if (ret <= 0)
+    {
+        pr_err("%s: %s failed to copy pathname from user space - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
+        goto out_free_buf;
+    }
+
+    path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out_free_buf;
+    }
+
+    last = strrchr(buf, '/');
+    if (!last) // filename
+        ret = kern_path(".", LOOKUP_FOLLOW, path);
+    else
+    {
+        *last = '\0';
+        ret = kern_path(buf, LOOKUP_FOLLOW, path);
+    }
+
+    if (ret == -ENOENT)
+        goto out_free_path;
+    if (ret)
+    {
+        pr_err("%s: %s cannot resolving target path %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+        goto out_free_path;
     }
 
     if (check_path(path))
@@ -631,7 +952,8 @@ out_free_exe:
     path_put(exe_path);
     kfree(exe_path);
 out_free_path:
-    path_put(path);
+    if (path)
+        path_put(path);
     kfree(path);
 out_free_buf:
     kfree(buf);
@@ -639,21 +961,18 @@ out:
     return ret;
 }
 
-// pre handler for openat syscall
-static int the_pre_hook_openat(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+// pre handler for syscall that have the dirfd as first arg and pathname/filename as second arg
+static int the_pre_hook_mkdirat(struct kretprobe_instance *ri, struct pt_regs *the_regs)
 {
     struct pt_regs *regs;
     struct path *target_path, *exe_path;
     log_work *the_log_work;
-    char *buf;
+    char *buf, *last;
     int dirfd, ret = -1;
+    struct filename *filename;
+    struct file *dirfile;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
-    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
-
-    if (regs->dx == O_RDONLY || regs->dx == (O_DIRECTORY | O_CREAT))
         goto out;
 
     buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
@@ -663,6 +982,8 @@ static int the_pre_hook_openat(struct kretprobe_instance *ri, struct pt_regs *th
         ret = -ENOMEM;
         goto out;
     }
+
+    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
 
     // copy pathname from user space
     ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
@@ -682,32 +1003,48 @@ static int the_pre_hook_openat(struct kretprobe_instance *ri, struct pt_regs *th
 
     dirfd = regs->di;
 
-    if (buf[0] != '/') // relative path
-    {
-        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT || ret == -EFAULT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
-            goto out_free_path;
-        }
-    }
-    else // absolute path
+    last = strrchr(buf, '/');
+    if (last)
+        *last = '\0';
+
+    if (buf[0] == '/') // absolute path
     {
         ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT)
-            goto out_free_path;
-        else if (ret)
+    }
+    else if (!last) // filename
+    {
+        dirfile = fget(dirfd);
+        if (IS_ERR(dirfile))
         {
-            pr_err("%s: %s cannot resolving target path %s with dirfd %d - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, dirfd, ret);
+            ret = -PTR_ERR(dirfile);
             goto out_free_path;
         }
+        memcpy(target_path, &(dirfile->f_path), sizeof(struct path));
+        path_get(target_path);
+        ret = 0;
+    }
+    else // relative path
+    {
+        filename = getname_kernel(buf);
+        if (IS_ERR(filename))
+        {
+            ret = -PTR_ERR(filename);
+            goto out_free_path;
+        }
+        ret = user_path_at(dirfd, filename->uptr, LOOKUP_FOLLOW, target_path);
+        putname(filename);
     }
 
-    if (check_path(target_path) != 0)
+    if (ret == -ENOENT)
+        goto out_free_path;
+    if (ret)
+    {
+        pr_err("%s: %s cannot resolving target path %s - err %d\n",
+               MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
+        goto out_free_path;
+    }
+
+    if (check_path_or_parent_dir(target_path) != 0)
     {
         ret = -1;
         goto out_free_path;
@@ -746,131 +1083,14 @@ out_free_work:
 out_free_exe:
     path_put(exe_path);
     kfree(exe_path);
-out_free_path:
+out_put_path:
     path_put(target_path);
+out_free_path:
     kfree(target_path);
 out_free_buf:
     kfree(buf);
 out:
-    return ret;
-}
-
-// pre handler for openat2 syscall
-static int the_pre_hook_openat2(struct kretprobe_instance *ri, struct pt_regs *the_regs)
-{
-    struct pt_regs *regs;
-    struct path *target_path, *exe_path;
-    log_work *the_log_work;
-    char *buf;
-    int dirfd, ret = -1;
-    struct open_how *how;
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
-    get(regs); // get the actual address of the CPU image seen by the system call (or its wrapper)
-
-    how = (struct open_how *)regs->dx;
-    if (how->flags == O_RDONLY)
-        goto out;
-
-    buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
-    if (!buf)
-    {
-        pr_err("%s: %s failed memory allocation for buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    // copy pathname from user space
-    ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
-    if (ret <= 0)
-    {
-        pr_err("%s: %s failed to copy pathname from user space - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, ret);
-        goto out_free_buf;
-    }
-
-    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
-    if (!target_path)
-    {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
-        goto out_free_buf;
-    }
-
-    dirfd = regs->di;
-
-    if (buf[0] != '/') // relative path
-    {
-        ret = user_path_at(dirfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT || ret == -EFAULT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, ret);
-            goto out_free_path;
-        }
-    }
-    else // absolute path
-    {
-        ret = kern_path(buf, LOOKUP_FOLLOW, target_path);
-        if (ret == -ENOENT)
-            goto out_free_path;
-        else if (ret)
-        {
-            pr_err("%s: %s cannot resolving target path %s with dirfd %d - err %d\n",
-                   MODNAME, ri->rph->rp->kp.symbol_name, buf, dirfd, ret);
-            goto out_free_path;
-        }
-    }
-
-    if (check_path(target_path) != 0)
-    {
-        ret = -1;
-        goto out_free_path;
-    }
-    regs->si = (unsigned long)NULL;
-
-    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
-    if (!exe_path)
-    {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
-        goto log_work;
-    }
-    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
-    path_get(exe_path);
-
-log_work:
-    // prepare log_work
-    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
-    if (!the_log_work)
-    {
-        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
-        goto out_free_exe;
-    }
-
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
-    if (ret)
-        goto out_free_work;
-
-    ret = -1;
-    goto out_free_buf;
-
-out_free_work:
-    kfree(the_log_work);
-out_free_exe:
-    path_put(exe_path);
-    kfree(exe_path);
-out_free_path:
-    path_put(target_path);
-    kfree(target_path);
-out_free_buf:
-    kfree(buf);
-out:
-    return ret;
+    return 0;
 }
 
 int register_hooks(void)
@@ -898,7 +1118,7 @@ int register_hooks(void)
     kretprobes[4].maxactive = -1;
 
     kretprobes[5].kp.symbol_name = creat;
-    kretprobes[5].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[5].entry_handler = (kretprobe_handler_t)the_pre_hook_creat;
     kretprobes[5].maxactive = -1;
 
     kretprobes[6].kp.symbol_name = rmdir;
@@ -918,11 +1138,11 @@ int register_hooks(void)
     kretprobes[9].maxactive = -1;
 
     kretprobes[10].kp.symbol_name = mkdir;
-    kretprobes[10].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_first_arg;
+    kretprobes[10].entry_handler = (kretprobe_handler_t)the_pre_hook_creat;
     kretprobes[10].maxactive = -1;
 
     kretprobes[11].kp.symbol_name = mkdirat;
-    kretprobes[11].entry_handler = (kretprobe_handler_t)the_pre_hook_sys_at;
+    kretprobes[11].entry_handler = (kretprobe_handler_t)the_pre_hook_mkdirat;
     kretprobes[11].maxactive = -1;
 
     for (i = 0; i < HOOKS; i++)

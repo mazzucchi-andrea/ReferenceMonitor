@@ -40,6 +40,18 @@ int check_path(const struct path *path)
     return -1;
 }
 
+int check_parent_dir(const struct path *path)
+{
+    struct path_entry *entry;
+   
+    list_for_each_entry(entry, &paths, list)
+    {
+        if (is_parent_dir(entry->path, path))
+            return 0;
+    }
+    return -1;
+}
+
 int check_path_or_parent_dir(const struct path *path)
 {
     struct path_entry *entry;

@@ -24,7 +24,7 @@ int main(void)
         printf("edit_paths failed with error %d\n", errno);
         return -errno;
     }
-    printf("%s added to Reference Monitor\n", test_dir);
+    printf("%s removed from Reference Monitor\n", test_dir);
 
     return 0;
 }

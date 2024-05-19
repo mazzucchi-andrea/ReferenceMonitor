@@ -21,11 +21,12 @@
 #define REC_ON 2
 #define REC_OFF 3
 
-extern int monitor_state;
+extern int8_t monitor_state;
+extern bool fs_mounted;
+extern struct mutex device_mutex;
 extern struct workqueue_struct *log_queue;
 
 bool is_mounted(void);
-ssize_t write_logfilefs(char*, size_t);
+ssize_t write_logfilefs(char *, size_t);
 
 #endif
-

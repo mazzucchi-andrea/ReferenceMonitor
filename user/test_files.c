@@ -93,7 +93,7 @@ int main(void)
         printf("Test unlinkat AT_FDCWD test_file_absolute_path 0 failed\n");
         exit(EXIT_FAILURE);
     }
-    printf("Test unlinkat AT_FDCWD test_dir_absolute_path 0 passed: ret %d, errno %d\n", ret, errno);
+    printf("Test unlinkat AT_FDCWD test_file_absolute_path 0 passed: ret %d, errno %d\n", ret, errno);
 
     // unlinkat AT_FDCWD test_dir_absolute_path AT_REMOVEDIR
     ret = syscall(SYS_unlinkat, AT_FDCWD, test_dir_absolute_path, AT_REMOVEDIR);

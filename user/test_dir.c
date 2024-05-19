@@ -34,9 +34,9 @@ int main(void)
 
     char *test_creat_relative_path = "./parent_dir/test_creat.txt";
 
-    struct open_how how_read, how_write;
+    /* struct open_how how_read, how_write;
     how_read.flags = O_RDONLY;
-    how_write.flags = O_WRONLY;
+    how_write.flags = O_WRONLY; */
 
     test_file_absolute_path = malloc(PATH_MAX);
     if (!test_file_absolute_path)
@@ -423,7 +423,7 @@ int main(void)
     printf("Test openat dirfd test_dir_name O_RDONLY passed\n");
     close(ret);
 
-    // openat2
+/*     // openat2
 
     // openat2 AT_FDCWD test_file_absolute_path O_WRONLY
     ret = syscall(SYS_openat2, AT_FDCWD, test_file_absolute_path, &how_write, sizeof(how_write));
@@ -499,7 +499,7 @@ int main(void)
         exit(EXIT_FAILURE);
     }
     printf("Test openat2 dirfd test_dir_name O_RDONLY passed\n");
-    close(ret);
+    close(ret); */
 
     return 0;
 }

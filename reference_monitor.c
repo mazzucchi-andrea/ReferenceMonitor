@@ -21,7 +21,8 @@
 #include "logfilefs.h"
 #include "path_list.h"
 
-#define PASSWORD_MAX_LEN 64
+// password max length including NULL terminator
+#define PASSWORD_MAX_LEN 65
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
@@ -33,7 +34,10 @@ u8 digest_password[SHA256_DIGEST_SIZE];
 char *the_password;
 module_param(the_password, charp, 0);
 
+// filesystestuff
 struct super_block *device_sb;
+DEFINE_MUTEX(device_mutex);
+bool fs_mounted = false;
 
 unsigned long the_ni_syscall;
 unsigned long new_sys_call_array[] = {0x0, 0x0, 0x0};
@@ -108,7 +112,7 @@ int check_root(void)
         return 0;
 }
 
-int monitor_state = REC_ON;
+int8_t monitor_state = REC_ON;
 
 void print_current_monitor_state(void)
 {
@@ -145,7 +149,7 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 {
         int ret;
         long copied;
-        char passwd_buf[PASSWORD_MAX_LEN + 1];
+        char passwd_buf[PASSWORD_MAX_LEN];
 
         pr_info("%s: _change_state called.\n", MODNAME);
 
@@ -155,7 +159,7 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
                 return -EPERM;
         }
 
-        copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN + 1);
+        copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN);
         if (copied < 0)
         {
                 return -EFAULT;
@@ -202,7 +206,7 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
         struct path _path;
         long copied;
         int ret = 0;
-        char passwd_buf[PASSWORD_MAX_LEN + 1];
+        char passwd_buf[PASSWORD_MAX_LEN];
 
         pr_info("%s: _edit_paths called.\n", MODNAME);
 
@@ -224,7 +228,7 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
                 return -1;
         }
 
-        copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN + 1);
+        copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN);
         if (copied < 0)
         {
                 pr_err("%s: failing copy password from user\n", MODNAME);
@@ -237,24 +241,11 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
                 return -1;
         }
 
-        if (path[0] != '/') // relative path
+        ret = user_path_at(AT_FDCWD, path, LOOKUP_FOLLOW, &_path);
+        if (ret)
         {
-
-                ret = user_path_at(AT_FDCWD, path, LOOKUP_FOLLOW, &_path);
-                if (ret)
-                {
-                        pr_err("%s: cannot resolving path\n", MODNAME);
-                        return ret;
-                }
-        }
-        else // absolute path
-        {
-                ret = kern_path(path, LOOKUP_FOLLOW, &_path);
-                if (ret)
-                {
-                        pr_err("%s: cannot resolving path\n", MODNAME);
-                        return ret;
-                }
+                pr_err("%s: cannot resolving path\n", MODNAME);
+                return ret;
         }
 
         if (mode == ADD)
@@ -275,8 +266,8 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
         int ret;
         long copied;
         u8 new_digest[SHA256_DIGEST_SIZE];
-        char old_passwd_buf[PASSWORD_MAX_LEN + 1];
-        char new_passwd_buf[PASSWORD_MAX_LEN + 1];
+        char old_passwd_buf[PASSWORD_MAX_LEN];
+        char new_passwd_buf[PASSWORD_MAX_LEN];
 
         pr_info("%s: _change_password called\n", MODNAME);
 
@@ -286,13 +277,13 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
                 return -EPERM;
         }
 
-        copied = strncpy_from_user(old_passwd_buf, old_password, PASSWORD_MAX_LEN + 1);
+        copied = strncpy_from_user(old_passwd_buf, old_password, PASSWORD_MAX_LEN);
         if (copied < 0)
         {
                 return -EFAULT;
         }
 
-        copied = strncpy_from_user(new_passwd_buf, new_password, PASSWORD_MAX_LEN + 1);
+        copied = strncpy_from_user(new_passwd_buf, new_password, PASSWORD_MAX_LEN);
         if (copied < 0)
         {
                 return -EFAULT;
@@ -382,7 +373,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         root_inode->i_sb = sb;
         root_inode->i_op = &logfilefs_inode_ops;       // set our inode operations
         root_inode->i_fop = &logfilefs_dir_operations; // set our file operations
-                                                       // update access permission
+        // update access permission
         root_inode->i_mode = S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IXUSR | S_IXGRP | S_IXOTH;
 
         // baseline alignment of the FS timestamp to the current time
@@ -411,9 +402,15 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
 
 static void logfilefs_kill_superblock(struct super_block *s)
 {
+        mutex_lock(&device_mutex);
+
         kill_block_super(s);
         pr_info("%s: logfilefs unmount succesful.\n", MODNAME);
+
         device_sb = NULL;
+        fs_mounted = false;
+
+        mutex_unlock(&device_mutex);
 
         return;
 }
@@ -464,6 +461,7 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
         struct dentry *ret;
         int err;
 
+        mutex_lock(&device_mutex);
 
         ret = mount_bdev(fs_type, flags, dev_name, data, logfilefs_fill_super);
 
@@ -482,6 +480,9 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
                 return ERR_PTR(err);
         }
 
+        fs_mounted = true;
+        mutex_unlock(&device_mutex);
+
         return ret;
 }
 
@@ -492,14 +493,6 @@ static struct file_system_type logfilefs_type = {
     .mount = logfilefs_mount,
     .kill_sb = logfilefs_kill_superblock,
 };
-
-bool is_mounted(void)
-{
-        bool ret = false;
-        if (device_sb != NULL && device_sb->s_count != 0)
-                ret = true;
-        return ret;
-}
 
 void logfilefs_update_file_size(loff_t file_size)
 {
@@ -672,6 +665,10 @@ int init_module(void)
                 return -1;
         }
 
+        // mutex init
+        mutex_init(&device_mutex);
+
+        // workqueue init
         log_queue = create_singlethread_workqueue("log_queue");
 
         // register hooks
@@ -702,6 +699,8 @@ void cleanup_module(void)
                 pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
         else
                 pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
+
+        mutex_destroy(&device_mutex);
 
         destroy_workqueue(log_queue);
 

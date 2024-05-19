@@ -11,5 +11,5 @@
         "chrono": "c",
         "span": "c"
     },
-    "C_Cpp.default.compilerPath": "/usr/bin/clang"
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc"
 }

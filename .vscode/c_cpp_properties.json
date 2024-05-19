@@ -6,9 +6,9 @@
                 "${workspaceFolder}",
                 "/usr/include",
                 "/usr/local/include",
-                "/usr/lib/modules/5.15.150-1-MANJARO/build/arch/x86/include/",
-                "/usr/lib/modules/5.15.150-1-MANJARO/build/include/",
-                "/usr/lib/modules/5.15.150-1-MANJARO/build/arch/x86/include/generated/"
+                "/usr/lib/modules/5.15.0-91-generic/build/arch/x86/include/",
+                "/usr/lib/modules/5.15.0-91-generic/build/include/",
+                "/usr/lib/modules/5.15.0-91-generic/build/arch/x86/include/generated/"
             ],
             "defines": [
                 "__KERNEL__",

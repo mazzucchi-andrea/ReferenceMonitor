@@ -21,9 +21,6 @@
 #include "logfilefs.h"
 #include "path_list.h"
 
-// password max length including NULL terminator
-#define PASSWORD_MAX_LEN 65
-
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
 
@@ -34,9 +31,10 @@ u8 digest_password[SHA256_DIGEST_SIZE];
 char *the_password;
 module_param(the_password, charp, 0);
 
-// filesystestuff
+// file system stuff
 struct super_block *device_sb;
-DEFINE_MUTEX(device_mutex);
+DECLARE_RWSEM(log_rw);
+DEFINE_SPINLOCK(fs_spinlock);
 bool fs_mounted = false;
 
 unsigned long the_ni_syscall;
@@ -45,6 +43,8 @@ unsigned long new_sys_call_array[] = {0x0, 0x0, 0x0};
 int restore[HACKED_ENTRIES] = {[0 ...(HACKED_ENTRIES - 1)] - 1};
 
 struct workqueue_struct *log_queue;
+
+int8_t monitor_state = REC_ON;
 
 int hash_password(const char *password, size_t password_len, u8 *hash)
 {
@@ -112,8 +112,6 @@ int check_root(void)
         return 0;
 }
 
-int8_t monitor_state = REC_ON;
-
 void print_current_monitor_state(void)
 {
         switch (monitor_state)
@@ -141,9 +139,6 @@ int check_rec_state(void)
                 return -1;
         return 0;
 }
-
-#define ADD 0
-#define REMOVE 1
 
 __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 {
@@ -402,86 +397,46 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
 
 static void logfilefs_kill_superblock(struct super_block *s)
 {
-        mutex_lock(&device_mutex);
+        unsigned long flags;
+
+        down_write(&log_rw);
+
+        spin_lock_irqsave(&fs_spinlock, flags);
+        fs_mounted = false;
+        spin_unlock_irqrestore(&fs_spinlock, flags);
+        device_sb = NULL;
 
         kill_block_super(s);
         pr_info("%s: logfilefs unmount succesful.\n", MODNAME);
 
-        device_sb = NULL;
-        fs_mounted = false;
-
-        mutex_unlock(&device_mutex);
+        up_write(&log_rw);
 
         return;
-}
-
-int logfilefs_init_inode(void)
-{
-        struct buffer_head *bh;
-        struct inode *the_inode;
-        logfilefs_inode *FS_specific_inode;
-
-        the_inode = iget_locked(device_sb, LOGFILEFS_FILE_INODE_NUMBER);
-        if (!the_inode)
-                return -ENOMEM;
-
-        // already cached inode - simply return successfully
-        if (!(the_inode->i_state & I_NEW))
-                return 0;
-
-        // this work is done if the inode was not already cached
-        inode_init_owner(device_sb->s_user_ns, the_inode, NULL, S_IFREG);
-        the_inode->i_mode = S_IFREG | S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IXUSR | S_IXGRP | S_IXOTH;
-        the_inode->i_fop = &logfilefs_file_operations;
-        the_inode->i_op = &logfilefs_inode_ops;
-
-        // just one link for this file
-        set_nlink(the_inode, 1);
-
-        // now we retrieve the file size via the FS specific inode, putting it into the generic inode
-        bh = sb_bread(device_sb, LOGFILEFS_INODES_BLOCK_NUMBER);
-        if (!bh)
-        {
-                iput(the_inode);
-                return -EIO;
-        }
-        FS_specific_inode = (logfilefs_inode *)bh->b_data;
-        i_size_write(the_inode, FS_specific_inode->file_size);
-        brelse(bh);
-
-        // unlock the inode to make it usable
-        unlock_new_inode(the_inode);
-
-        return 0;
 }
 
 // called on file system mounting
 struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data)
 {
         struct dentry *ret;
-        int err;
+        unsigned long irq_flags;
 
-        mutex_lock(&device_mutex);
+        down_write(&log_rw);
 
         ret = mount_bdev(fs_type, flags, dev_name, data, logfilefs_fill_super);
 
         if (unlikely(IS_ERR(ret)))
         {
                 pr_err("%s: error mounting logfilefs\n", MODNAME);
+                up_write(&log_rw);
                 return ret;
         }
         else
                 pr_info("%s: logfilefs is succesfully mounted on from device %s\n", MODNAME, dev_name);
 
-        err = logfilefs_init_inode();
-        if (err < 0)
-        {
-                pr_err("%s: logfilefs init inode failed - err %d\n", MODNAME, err);
-                return ERR_PTR(err);
-        }
-
+        spin_lock_irqsave(&fs_spinlock, irq_flags);
         fs_mounted = true;
-        mutex_unlock(&device_mutex);
+        spin_unlock_irqrestore(&fs_spinlock, irq_flags);
+        up_write(&log_rw);
 
         return ret;
 }
@@ -498,16 +453,6 @@ void logfilefs_update_file_size(loff_t file_size)
 {
         struct buffer_head *bh;
         logfilefs_inode *inode;
-        struct inode *the_inode;
-
-        the_inode = iget_locked(device_sb, LOGFILEFS_FILE_INODE_NUMBER);
-        if (!the_inode)
-        {
-                pr_err("%s: can not get logfile inode from vfs\n", MODNAME);
-                return;
-        }
-        i_size_write(the_inode, file_size);
-        inode_unlock(the_inode);
 
         bh = sb_bread(device_sb, LOGFILEFS_INODES_BLOCK_NUMBER);
         if (!bh)
@@ -535,17 +480,76 @@ loff_t logfilefs_get_file_size(void)
         return file_size;
 }
 
+bool is_mounted(void)
+{
+        bool ret = false;
+        unsigned long flags;
+        spin_lock_irqsave(&fs_spinlock, flags);
+        ret = fs_mounted;
+        spin_unlock_irqrestore(&fs_spinlock, flags);
+        return ret;
+}
+
+/*
+ * Return: -ENODEV if logfilefs is not mounted, -EBUSY if lock is busy,
+ * 0 on success
+ */
+int try_log_write_lock(void)
+{
+        unsigned long flags;
+        int ret = 0;
+        spin_lock_irqsave(&fs_spinlock, flags);
+        if (fs_mounted)
+        {
+                if (!down_write_trylock(&log_rw))
+                {
+                        ret = -EBUSY;
+                }
+        }
+        else
+                ret = -ENODEV;
+        spin_unlock_irqrestore(&fs_spinlock, flags);
+        return ret;
+}
+
+/*
+ * Return: -ENODEV if logfilefs is not mounted, -EBUSY if lock is busy,
+ * 0 on success
+ */
+int try_log_read_lock(void)
+{
+        unsigned long flags;
+        int ret = 0;
+        spin_lock_irqsave(&fs_spinlock, flags);
+        if (fs_mounted)
+        {
+                if (!down_read_trylock(&log_rw))
+                        ret = -EBUSY;
+        }
+        else
+                ret = -ENODEV;
+        spin_unlock_irqrestore(&fs_spinlock, flags);
+        return ret;
+}
+
 ssize_t write_logfilefs(char *data, size_t len)
 {
-        int block_to_write;
+        int block_to_write, ret;
         loff_t file_size, offset;
         loff_t maxbytes = device_sb->s_maxbytes;
         ssize_t bytes_written = 0;
         struct buffer_head *bh;
 
+        ret = try_log_write_lock();
+        if (ret)
+                return ret;
+
         file_size = logfilefs_get_file_size();
         if (file_size < 0)
+        {
+                up_write(&log_rw);
                 return -EIO;
+        }
 
         offset = file_size; // always append
 
@@ -553,6 +557,7 @@ ssize_t write_logfilefs(char *data, size_t len)
         if (file_size == maxbytes)
         {
                 pr_err("%s: logfile is full\n", MODNAME);
+                up_write(&log_rw);
                 return -ENOSPC; // fs full
         }
 
@@ -570,17 +575,13 @@ ssize_t write_logfilefs(char *data, size_t len)
                 {
                         pr_err("%s: can not get the block for logging work\n", MODNAME);
                         logfilefs_update_file_size(file_size);
+                        up_write(&log_rw);
                         return -EIO;
                 }
-                // pr_info("%s: Writing %d bytes inside block %d\n", MODNAME, bytes_to_write, block_to_write);
                 memcpy((bh->b_data + (offset % DEFAULT_BLOCK_SIZE)), (data + bytes_written), bytes_to_write);
-                // pr_info("%s: Written %d bytes inside block %d\n", MODNAME, bytes_to_write, block_to_write);
                 mark_buffer_dirty(bh);
-                // pr_info("%s: buffer_head marked as dirty\n", MODNAME);
                 sync_dirty_buffer(bh);
-                // pr_info("%s: dirty buffer_head synced\n", MODNAME);
                 brelse(bh);
-                // pr_info("%s: buffer_head released\n", MODNAME);
 
                 bytes_written += bytes_to_write;
                 offset += bytes_to_write;
@@ -588,6 +589,7 @@ ssize_t write_logfilefs(char *data, size_t len)
                 logfilefs_update_file_size(file_size);
         }
 
+        up_write(&log_rw);
         return bytes_written;
 }
 
@@ -665,8 +667,8 @@ int init_module(void)
                 return -1;
         }
 
-        // mutex init
-        mutex_init(&device_mutex);
+        // spinlock init
+        spin_lock_init(&fs_spinlock);
 
         // workqueue init
         log_queue = create_singlethread_workqueue("log_queue");
@@ -699,8 +701,6 @@ void cleanup_module(void)
                 pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
         else
                 pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
-
-        mutex_destroy(&device_mutex);
 
         destroy_workqueue(log_queue);
 

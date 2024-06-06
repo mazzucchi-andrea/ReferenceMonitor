@@ -16,6 +16,10 @@ bool is_parent_dir(const struct path *parent, const struct path *child)
     if (!parent || !child)
         return false;
 
+    // Check if the parent and child dentries are valid
+    if (!parent->dentry || !child->dentry || !child->dentry->d_parent)
+        return false;
+
     // Check if the inodes match
     if (parent->dentry->d_inode != child->dentry->d_parent->d_inode)
         return false;

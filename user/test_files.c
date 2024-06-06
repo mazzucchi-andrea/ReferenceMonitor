@@ -276,6 +276,15 @@ int main(void)
     }
     printf("Test open test_file_relative_path O_WRONLY passed: ret %d, errno %d\n", ret, errno);
 
+    // open test_file_absolute_path O_RDWR
+    ret = syscall(SYS_open, test_file_absolute_path, O_RDWR);
+    if (ret > 0)
+    {
+        printf("Test open test_file_absolute_path O_RDWR failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Test open test_file_absolute_path O_RDWR passed: ret %d, errno %d\n", ret, errno);
+
     // open test_file_absolute_path O_RDONLY
     ret = syscall(SYS_open, test_file_absolute_path, O_RDONLY);
     if (ret < 0)

@@ -1,14 +1,33 @@
 #include "logfilefs.h"
 #include "reference_monitor.h"
 
+void update_i_size(struct inode *the_inode)
+{
+    struct buffer_head *bh = NULL;
+    logfilefs_inode *FS_specific_inode;
+
+    bh = (struct buffer_head *)sb_bread(the_inode->i_sb, LOGFILEFS_INODES_BLOCK_NUMBER);
+    if (!bh)
+        return;
+    FS_specific_inode = (logfilefs_inode *)bh->b_data;
+    i_size_write(the_inode, FS_specific_inode->file_size);
+    brelse(bh);
+}
+
 ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *off)
 {
     struct buffer_head *bh = NULL;
     struct inode *the_inode = filp->f_inode;
-    uint64_t file_size = the_inode->i_size;
-    int ret;
+    uint64_t file_size;
     loff_t offset;
-    int block_to_read; // index of the block to be read from device
+    int block_to_read, ret; // index of the block to be read from device
+
+    ret = try_log_read_lock();
+    if (ret)
+        return ret;
+
+    update_i_size(the_inode);
+    file_size = i_size_read(the_inode);
 
     pr_info("%s: read operation called with len %ld - and offset %lld (the current file size is %lld)", MODNAME, len, *off, file_size);
 
@@ -18,7 +37,10 @@ ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *
 
     // check that *off is within boundaries
     if (*off >= file_size)
+    {
+        up_read(&log_rw);
         return 0;
+    }
     else if (*off + len > file_size)
         len = file_size - *off;
 
@@ -36,12 +58,14 @@ ssize_t logfilefs_read(struct file *filp, char __user *buf, size_t len, loff_t *
     bh = (struct buffer_head *)sb_bread(filp->f_path.dentry->d_inode->i_sb, block_to_read);
     if (!bh)
     {
+        up_read(&log_rw);
         return -EIO;
     }
     ret = copy_to_user(buf, bh->b_data + offset, len);
     *off += (len - ret);
     brelse(bh);
 
+    up_read(&log_rw);
     return len - ret;
 }
 
@@ -64,11 +88,9 @@ struct dentry *logfilefs_lookup(struct inode *parent_inode, struct dentry *child
         // already cached inode - simply return successfully
         if (!(the_inode->i_state & I_NEW))
         {
-            if (hlist_empty(&the_inode->i_dentry)){
-                d_add(child_dentry, the_inode);
-                dget(child_dentry);
-            }
+            update_i_size(the_inode);
             inode_unlock(the_inode);
+            iput(the_inode);
             return child_dentry;
         }
 
@@ -89,7 +111,7 @@ struct dentry *logfilefs_lookup(struct inode *parent_inode, struct dentry *child
             return ERR_PTR(-EIO);
         }
         FS_specific_inode = (logfilefs_inode *)bh->b_data;
-        the_inode->i_size = FS_specific_inode->file_size;
+        i_size_write(the_inode, FS_specific_inode->file_size);
         brelse(bh);
 
         d_add(child_dentry, the_inode);

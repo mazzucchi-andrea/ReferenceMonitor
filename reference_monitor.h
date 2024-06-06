@@ -14,19 +14,27 @@
 
 #define AUDIT if (1)
 
+// password max length including NULL terminator
+#define PASSWORD_MAX_LEN 65
+
 #define SHA256_DIGEST_SIZE 32
+
+#define ADD 0
+#define REMOVE 1
 
 #define ON 0
 #define OFF 1
 #define REC_ON 2
 #define REC_OFF 3
 
-extern int8_t monitor_state;
 extern bool fs_mounted;
-extern struct mutex device_mutex;
+extern int8_t monitor_state;
+extern struct rw_semaphore log_rw;
 extern struct workqueue_struct *log_queue;
 
 bool is_mounted(void);
+int try_log_write_lock(void);
+int try_log_read_lock(void);
 ssize_t write_logfilefs(char *, size_t);
 
 #endif

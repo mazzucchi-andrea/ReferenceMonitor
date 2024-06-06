@@ -1,15 +1,7 @@
 {
     "files.associations": {
-        "slab.h": "c",
-        "cdev.h": "c",
-        "crypto.h": "c",
-        "stdlib.h": "c",
         "logfilefs.h": "c",
-        "stdio.h": "c",
-        "cerrno": "c",
-        "fcntl.h": "c",
-        "chrono": "c",
-        "span": "c"
+        "reference_monitor.h": "c"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/gcc"
 }

@@ -7,7 +7,7 @@ all:
 	gcc -Werror -Wpedantic -Wall -Wextra remove_test_file_rf.c -o remove_test_file_rf
 	gcc -Werror -Wpedantic -Wall -Wextra remove_test_dir_rf.c -o remove_test_dir_rf
 	gcc -Werror -Wpedantic -Wall -Wextra test_files.c -o test_files -lpthread 
-	gcc -Werror -Wpedantic -Wall -Wextra test_dir.c -o test_dir
+	gcc -Werror -Wpedantic -Wall -Wextra test_dir.c -o test_dir -lpthread
 
 clean:
 	rm main

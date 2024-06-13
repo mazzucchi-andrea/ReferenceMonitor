@@ -6,7 +6,7 @@ all:
 	gcc -Werror -Wpedantic -Wall -Wextra add_test_dir_rf.c -o add_test_dir_rf
 	gcc -Werror -Wpedantic -Wall -Wextra remove_test_file_rf.c -o remove_test_file_rf
 	gcc -Werror -Wpedantic -Wall -Wextra remove_test_dir_rf.c -o remove_test_dir_rf
-	gcc -Werror -Wpedantic -Wall -Wextra test_files.c -o test_files
+	gcc -Werror -Wpedantic -Wall -Wextra test_files.c -o test_files -lpthread 
 	gcc -Werror -Wpedantic -Wall -Wextra test_dir.c -o test_dir
 
 clean:
@@ -19,3 +19,4 @@ clean:
 	rm remove_test_dir_rf
 	rm test_files
 	rm test_dir
+	rm -r parent_dir

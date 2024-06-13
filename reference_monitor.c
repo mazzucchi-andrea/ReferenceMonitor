@@ -174,18 +174,16 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
                 return -1;
         }
 
-        if (state == ON || state == REC_ON)
+        if ((state == ON || state == REC_ON) && (monitor_state == OFF || monitor_state == REC_OFF))
         {
-                ret = enable_hooks();
+                ret = register_hooks();
                 if (unlikely(ret != 0))
                         return ret;
+                refresh_list();
+                print_paths();
         }
-        else
-        {
-                ret = disable_hooks();
-                if (unlikely(ret != 0))
-                        return ret;
-        }
+        else if ((state == OFF || state == REC_OFF) && (monitor_state == ON || monitor_state == REC_ON))
+                unregister_hooks();
 
         monitor_state = state;
 
@@ -556,7 +554,7 @@ ssize_t write_logfilefs(char *data, size_t len)
         // check file size
         if (file_size == maxbytes)
         {
-                pr_err("%s: logfile is full\n", MODNAME);
+                // pr_err("%s: logfile is full\n", MODNAME);
                 up_write(&log_rw);
                 return -ENOSPC; // fs full
         }

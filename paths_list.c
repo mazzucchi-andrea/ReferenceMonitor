@@ -32,6 +32,26 @@ bool is_parent_dir(const struct path *parent, const struct path *child)
     return true;
 }
 
+bool is_path_deleted(struct path *path)
+{
+    struct dentry *dentry = path->dentry;
+    struct inode *inode = dentry->d_inode;
+
+    // Check if the inode's link count is zero
+    if (inode && inode->i_nlink == 0)
+    {
+        return true;
+    }
+
+    // Check if the dentry is marked as deleted
+    if (dentry->d_flags & DCACHE_DENTRY_KILLED)
+    {
+        return true;
+    }
+
+    return false;
+}
+
 int check_path(const struct path *path)
 {
     struct path_entry *entry;
@@ -47,7 +67,7 @@ int check_path(const struct path *path)
 int check_parent_dir(const struct path *path)
 {
     struct path_entry *entry;
-   
+
     list_for_each_entry(entry, &paths, list)
     {
         if (is_parent_dir(entry->path, path))
@@ -59,7 +79,7 @@ int check_parent_dir(const struct path *path)
 int check_path_or_parent_dir(const struct path *path)
 {
     struct path_entry *entry;
-   
+
     list_for_each_entry(entry, &paths, list)
     {
         if (path_equal(entry->path, path) || is_parent_dir(entry->path, path))
@@ -134,6 +154,22 @@ void print_paths(void)
     kfree(buf);
 }
 
+void refresh_list(void)
+{
+    struct path_entry *entry, *tmp;
+
+    list_for_each_entry_safe(entry, tmp, &paths, list)
+    {
+        if (is_path_deleted(entry->path))
+        {
+            list_del(&entry->list);
+            path_put(entry->path);
+            kfree(entry->path);
+            kfree(entry);
+        }
+    }
+}
+
 void cleanup_list(void)
 {
     struct path_entry *entry, *tmp;
@@ -141,9 +177,7 @@ void cleanup_list(void)
     list_for_each_entry_safe(entry, tmp, &paths, list)
     {
         list_del(&entry->list);
-
         kfree(entry->path);
-
         kfree(entry);
     }
 }

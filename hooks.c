@@ -32,15 +32,6 @@ typedef struct _log_work
     struct path *exe_path;
 } log_work;
 
-struct open_flags
-{
-    int open_flag;
-    umode_t mode;
-    int acc_mode;
-    int intent;
-    int lookup_flags;
-};
-
 // kretprobes
 struct kretprobe kretprobes[HOOKS];
 
@@ -264,7 +255,7 @@ skip_checksum:
 
     ret = write_logfilefs(log_entry, len);
     if (ret < 0)
-        pr_err("%s: error %d during log entry write\n", MODNAME, ret);
+        pr_err("%s: write_logfilefs failed - err %d\n", MODNAME, ret);
     else if (!ret)
         pr_info("%s: log entry no bytes written\n", MODNAME);
 
@@ -346,6 +337,89 @@ static int do_general_entry_handler(struct kretprobe_instance *ri, struct pt_reg
     if (check_path_or_parent_dir(target_path))
     {
         ret = -1;
+        goto out_put_path;
+    }
+
+    the_regs->di = err;
+    memcpy(&(the_regs->si), &(err), sizeof(unsigned long));
+
+    exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!exe_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        ret = -ENOMEM;
+        goto out_put_path;
+    }
+    memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
+    path_get(exe_path);
+
+    // prepare log_work
+    the_log_work = (log_work *)kzalloc(sizeof(log_work), GFP_ATOMIC);
+    if (!the_log_work)
+    {
+        pr_err("%s: failed memory allocation for log_work\n", MODNAME);
+        ret = -ENOMEM;
+        goto out_free_exe;
+    }
+
+    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    if (!ret)
+        return -1;
+
+    kfree(the_log_work);
+out_free_exe:
+    path_put(exe_path);
+    kfree(exe_path);
+out_put_path:
+    path_put(target_path);
+out_free_path:
+    kfree(target_path);
+    return -1;
+}
+
+static int do_renameat2_entry_handler(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+{
+    struct path *target_path, *exe_path;
+    struct filename *filename;
+    log_work *the_log_work;
+    int dfd, ret = -1;
+    bool first = true;
+    unsigned long err = -EPERM;
+
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        return -1;
+
+    dfd = (int)the_regs->di;
+    filename = (struct filename *)the_regs->si;
+
+filename2:
+    if (IS_ERR_OR_NULL(filename))
+        return -1;
+
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        return -ENOMEM;
+    }
+
+    ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
+    if (ret && ret != -2)
+    {
+        pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, dfd, filename->name, ret);
+        goto out_free_path;
+    }
+
+    if (check_path_or_parent_dir(target_path))
+    {
+        ret = -1;
+        if (first)
+        {
+            first = false;
+            dfd = (int)the_regs->dx;
+            filename = (struct filename *)the_regs->cx;
+            goto filename2;
+        }
         goto out_put_path;
     }
 
@@ -534,7 +608,7 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
     how = (struct open_how *)the_regs->dx;
     flags = how->flags;
 
-    if ((flags & O_ACCMODE) == O_RDONLY && !((flags & O_CREAT) == O_CREAT))
+    if (((flags & O_ACCMODE) == O_RDONLY) && ((flags & O_CREAT) != O_CREAT))
         return -1;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
@@ -544,7 +618,10 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
         return -ENOMEM;
     }
 
-    if ((flags & O_CREAT) == O_CREAT)
+    ret = user_path_at(dfd, (const char __user *)the_regs->si, LOOKUP_FOLLOW, target_path);
+    if (!ret)
+        goto check;
+    else if ((flags & O_CREAT) == O_CREAT)
     {
         buf = kmalloc(PATH_MAX, GFP_ATOMIC);
         if (!buf)
@@ -576,6 +653,7 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
                 memcpy(target_path, &(f->f_path), sizeof(struct path));
                 fput(f);
                 path_get(target_path);
+                ret = 0;
             }
         }
         else if (buf[0] == '/') // absolute path
@@ -603,8 +681,6 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
         }
         kfree(buf);
     }
-    else
-        ret = user_path_at(dfd, (const char __user *)the_regs->si, LOOKUP_FOLLOW, target_path);
 
     if (ret && ret != -2)
     {
@@ -612,6 +688,7 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
         goto out_free_path;
     }
 
+check:
     if (check_path(target_path))
     {
         ret = -1;
@@ -719,7 +796,7 @@ int register_hooks(void)
     kretprobes[1].maxactive = -1;
 
     kretprobes[2].kp.symbol_name = do_renameat2;
-    kretprobes[2].entry_handler = (kretprobe_handler_t)do_general_entry_handler;
+    kretprobes[2].entry_handler = (kretprobe_handler_t)do_renameat2_entry_handler;
     kretprobes[2].maxactive = -1;
 
     kretprobes[3].kp.symbol_name = do_mkdirat;
@@ -752,43 +829,4 @@ void unregister_hooks(void)
 
     for (i = 0; i < HOOKS; i++)
         unregister_kretprobe(&kretprobes[i]);
-}
-
-int disable_hooks(void)
-{
-    int i, ret;
-
-    for (i = 0; i < HOOKS; i++)
-    {
-        ret = disable_kretprobe(&kretprobes[i]);
-        if (likely(ret == 0))
-            pr_info("%s: kretprobe disable of %s success\n", MODNAME, kretprobes[i].kp.symbol_name);
-        else
-        {
-            pr_err("%s: kretprobe disable of %s failed, err %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
-            unregister_hooks();
-        }
-    }
-
-    return ret;
-}
-
-int enable_hooks(void)
-{
-    int i, ret;
-
-    for (i = 0; i < HOOKS; i++)
-    {
-        ret = enable_kretprobe(&kretprobes[i]);
-        if (likely(ret == 0))
-            pr_info("%s: kretprobe enable of %s success\n", MODNAME, kretprobes[i].kp.symbol_name);
-        else
-        {
-            pr_err("%s: kretprobe enable of %s failed, err %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
-            unregister_hooks();
-            ret = register_hooks();
-        }
-    }
-
-    return ret;
 }

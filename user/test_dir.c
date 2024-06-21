@@ -110,9 +110,7 @@ void *unlinkat_dirfd_test_dir_name_AT_REMOVEDIR(void *arg)
 void *rename_test_file_absolute_path(void *arg)
 {
     arg = arg;
-
-    int ret = syscall(SYS_rename, test_file_absolute_path, test_file_relative_path_rename);
-    if (!ret)
+    if (!syscall(SYS_rename, test_file_absolute_path, test_file_relative_path_rename))
     {
         printf("Test rename test_file_absolute_path failed\n");
         __sync_fetch_and_add(&failed, 1);
@@ -123,9 +121,7 @@ void *rename_test_file_absolute_path(void *arg)
 void *rename_test_file_relative_path(void *arg)
 {
     arg = arg;
-
-    int ret = syscall(SYS_rename, test_file_relative_path, test_file_relative_path_rename);
-    if (!ret)
+    if (!syscall(SYS_rename, test_file_relative_path, test_file_relative_path_rename))
     {
         printf("Test rename test_file_relative_path failed\n");
         __sync_fetch_and_add(&failed, 1);
@@ -136,9 +132,7 @@ void *rename_test_file_relative_path(void *arg)
 void *rename_test_dir_absolute_path(void *arg)
 {
     arg = arg;
-
-    int ret = syscall(SYS_rename, test_dir_absolute_path, test_dir_relative_path_rename);
-    if (!ret)
+    if (!syscall(SYS_rename, test_dir_absolute_path, test_dir_relative_path_rename))
     {
         printf("Test rename test_dir_absolute_path failed\n");
         __sync_fetch_and_add(&failed, 1);
@@ -149,9 +143,7 @@ void *rename_test_dir_absolute_path(void *arg)
 void *rename_test_dir_relative_path(void *arg)
 {
     arg = arg;
-
-    int ret = syscall(SYS_rename, test_dir_relative_path, test_dir_relative_path_rename);
-    if (!ret)
+    if (!syscall(SYS_rename, test_dir_relative_path, test_dir_relative_path_rename))
     {
         printf("Test rename test_dir_relative_path failed\n");
         __sync_fetch_and_add(&failed, 1);
@@ -317,7 +309,7 @@ void *mkdir_test_relative_path(void *arg)
 void *mkdirat_dirfd_mkdir_name(void *arg)
 {
     arg = arg;
-    if (!syscall(SYS_mkdirat, dirfd, mkdir_name, 0777))
+    if (!syscall(SYS_mkdirat, dirfd, test_dir_name, 0777))
     {
         printf("Test mkdirat dirfd mkdir_name failed\n");
         __sync_fetch_and_add(&failed, 1);
@@ -376,7 +368,6 @@ void *open_test_file_relative_path_O_RDONLY(void *arg)
 void *openat_vscode(void *arg)
 {
     arg = arg;
-
     if (openat(AT_FDCWD, test_file_absolute_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666) < 0)
     {
         printf("Test openat vscode failed\n");

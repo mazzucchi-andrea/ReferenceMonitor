@@ -16,16 +16,14 @@
 #include <linux/vmalloc.h>
 
 #include "lib/include/scth.h"
+#include "lib/include/usctm.h"
 #include "reference_monitor.h"
-#include "hooks.h"
 #include "logfilefs.h"
 #include "path_list.h"
+#include "wrappers.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andrea Mazzucchi <mazzucchiandrea@gmail.com>");
-
-unsigned long the_syscall_table = 0x0;
-module_param(the_syscall_table, ulong, 0660);
 
 u8 digest_password[SHA256_DIGEST_SIZE];
 char *the_password;
@@ -176,14 +174,14 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 
         if ((state == ON || state == REC_ON) && (monitor_state == OFF || monitor_state == REC_OFF))
         {
-                ret = register_hooks();
+                ret = register_wrappers();
                 if (unlikely(ret != 0))
                         return ret;
                 refresh_list();
                 print_paths();
         }
         else if ((state == OFF || state == REC_OFF) && (monitor_state == ON || monitor_state == REC_ON))
-                unregister_hooks();
+                unregister_wrappers();
 
         monitor_state = state;
 
@@ -595,19 +593,21 @@ int init_module(void)
 {
         int i, ret;
 
-        if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0))
+        if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0))
         {
                 pr_notice("%s: unsupported kernel version", MODNAME);
                 return -1;
         };
 
-        if (the_syscall_table == 0x0)
+        syscall_table_finder();
+        if (sys_call_table_address == 0x0)
         {
                 pr_notice("%s: cannot manage sys_call_table address set to 0x0\n", MODNAME);
                 return -1;
         }
 
-        if (strlen(the_password) <= 0)
+        ret = strlen(the_password);
+        if (ret <= 0)
         {
                 pr_notice("%s: invalid password length.\n", MODNAME);
                 return ret;
@@ -622,7 +622,7 @@ int init_module(void)
 
         AUDIT
         {
-                pr_info("%s: reference_monitor received sys_call_table address %px\n", MODNAME, (void *)the_syscall_table);
+                pr_info("%s: reference_monitor received sys_call_table address %px\n", MODNAME, (void *)sys_call_table_address);
                 pr_info("%s: initializing - hacked entries %d\n", MODNAME, HACKED_ENTRIES);
         }
 
@@ -630,7 +630,7 @@ int init_module(void)
         new_sys_call_array[1] = (unsigned long)sys_edit_paths;
         new_sys_call_array[2] = (unsigned long)sys_change_password;
 
-        ret = get_entries(restore, HACKED_ENTRIES, (unsigned long *)the_syscall_table, &the_ni_syscall);
+        ret = get_entries(restore, HACKED_ENTRIES, (unsigned long *)sys_call_table_address, &the_ni_syscall);
 
         if (ret != HACKED_ENTRIES)
         {
@@ -642,23 +642,25 @@ int init_module(void)
 
         for (i = 0; i < HACKED_ENTRIES; i++)
         {
-                ((unsigned long *)the_syscall_table)[restore[i]] = (unsigned long)new_sys_call_array[i];
+                ((unsigned long *)sys_call_table_address)[restore[i]] = (unsigned long)new_sys_call_array[i];
         }
 
         protect_memory();
 
         AUDIT
         {
-                pr_info("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
-                pr_info("%s: %s is at table entry %d\n", MODNAME, "_change_state", restore[0]);
-                pr_info("%s: %s is at table entry %d\n", MODNAME, "_edit_paths", restore[1]);
-                pr_info("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
+                pr_notice("%s: all new system-calls correctly installed on sys-call table\n", MODNAME);
+                pr_notice("%s: %s is at table entry %d\n", MODNAME, "_change_state", restore[0]);
+                pr_notice("%s: %s is at table entry %d\n", MODNAME, "_edit_paths", restore[1]);
+                pr_notice("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
         }
 
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
+        {
                 pr_info("%s: sucessfully registered logfilefs\n", MODNAME);
+        }
         else
         {
                 pr_err("%s: failed to register logfilefs - error %d", MODNAME, ret);
@@ -671,13 +673,14 @@ int init_module(void)
         // workqueue init
         log_queue = create_singlethread_workqueue("log_queue");
 
-        // register hooks
-        ret = register_hooks();
+        ret = register_wrappers();
         if (likely(ret == 0))
-                pr_info("%s: sucessfully registered hooks\n", MODNAME);
+        {
+                pr_info("%s: sucessfully registered wrappers\n", MODNAME);
+        }
         else
         {
-                pr_err("%s: failed to register hooks - error %d", MODNAME, ret);
+                pr_err("%s: failed to register wrappers - error %d", MODNAME, ret);
                 return -1;
         }
 
@@ -702,13 +705,13 @@ void cleanup_module(void)
 
         destroy_workqueue(log_queue);
 
-        unregister_hooks();
-        pr_info("%s: unregistered hooks\n", MODNAME);
+        unregister_wrappers();
+        pr_info("%s: unregistered wrappers\n", MODNAME);
 
         unprotect_memory();
         for (i = 0; i < HACKED_ENTRIES; i++)
         {
-                ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
+                ((unsigned long *)sys_call_table_address)[restore[i]] = the_ni_syscall;
         }
         protect_memory();
         pr_info("%s: sys-call table restored to its original content\n", MODNAME);

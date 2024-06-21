@@ -2,21 +2,31 @@
     "configurations": [
         {
             "name": "Linux",
-            "includePath": [
-                "${workspaceFolder}",
-                "/usr/include",
-                "/usr/local/include",
-                "/usr/lib/modules/5.15.0-91-generic/build/arch/x86/include/",
-                "/usr/lib/modules/5.15.0-91-generic/build/include/",
-                "/usr/lib/modules/5.15.0-91-generic/build/arch/x86/include/generated/"
-            ],
             "defines": [
                 "__KERNEL__",
                 "MODULE"
             ],
+            "compilerPath": "/usr/bin/gcc",
             "cStandard": "gnu11",
             "cppStandard": "gnu++11",
-            "intelliSenseMode": "linux-gcc-x64"
+            "intelliSenseMode": "linux-gcc-x64",
+            "includePath": [
+                "${workspaceFolder}",
+                "/usr/include",
+                "/usr/local/include",
+                "/usr/lib/modules/5.15.0-102-generic/build/arch/x86/include/",
+                "/usr/lib/modules/5.15.0-102-generic/build/include/",
+                "/usr/lib/modules/5.15.0-102-generic/build/arch/x86/include/generated/",
+                "/usr/lib/gcc/x86_64-linux-gnu/9/include",
+                "/usr/src/linux-headers-5.15.0-102-generic/arch/x86/include",
+                "/usr/src/linux-headers-5.15.0-102-generic/arch/x86/include/uapi",
+                "/usr/src/linux-headers-5.15.0-102-generic/arch/x86/include/generated",
+                "/usr/src/linux-headers-5.15.0-102-generic/arch/x86/include/generated/uapi",
+                "/usr/src/linux-headers-5.15.0-102-generic/include",
+                "/usr/src/linux-headers-5.15.0-102-generic/include/uapi",
+                "/usr/src/linux-headers-5.15.0-102-generic/include/generated/uapi",
+                "/usr/src/linux-headers-5.15.0-102-generic/ubuntu/include"
+            ]
         }
     ],
     "version": 4

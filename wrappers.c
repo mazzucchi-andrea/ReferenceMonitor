@@ -17,7 +17,7 @@
 
 #define calc_enoent "program attempting the illegal operation no longer exists"
 
-#define HOOKS 6
+#define WRAPPERS 6
 
 typedef struct _log_work
 {
@@ -32,8 +32,8 @@ typedef struct _log_work
     struct path *exe_path;
 } log_work;
 
-// kretprobes
-struct kretprobe kretprobes[HOOKS];
+// kprobes
+struct kprobe kprobes[WRAPPERS];
 
 int binary2hexadecimal(const u8 *bin, size_t bin_len, char *buf, size_t buf_len)
 {
@@ -303,51 +303,50 @@ int schedule_log_work(log_work *the_log_work, const char *target_func, struct pa
     return 0;
 }
 
-static int do_general_entry_handler(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+static int do_general_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path;
     struct filename *filename;
     log_work *the_log_work;
-    int dfd, ret = -1;
+    int dfd, ret;
     unsigned long err = -EPERM;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return -1;
+        return 0;
 
-    dfd = (int)the_regs->di;
-    filename = (struct filename *)the_regs->si;
+    dfd = (int)regs->di;
+    filename = (struct filename *)regs->si;
 
     if (IS_ERR_OR_NULL(filename))
-        return -1;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        return -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        return 0;
     }
 
     ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
-    if (ret && ret != -2)
+    if (ret)
     {
-        pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, dfd, filename->name, ret);
+        if (ret != -2)
+            pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->symbol_name, dfd, filename->name, ret);
         goto out_free_path;
     }
 
     if (check_path_or_parent_dir(target_path))
     {
-        ret = -1;
         goto out_put_path;
     }
 
-    the_regs->di = err;
-    memcpy(&(the_regs->si), &(err), sizeof(unsigned long));
+    regs->di = err;
+    memcpy(&(regs->si), &(err), sizeof(unsigned long));
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
         goto out_put_path;
     }
     memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
@@ -358,13 +357,12 @@ static int do_general_entry_handler(struct kretprobe_instance *ri, struct pt_reg
     if (!the_log_work)
     {
         pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
     if (!ret)
-        return -1;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -374,63 +372,63 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-    return -1;
+    return 0;
 }
 
-static int do_renameat2_entry_handler(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+static int do_renameat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path;
     struct filename *filename;
     log_work *the_log_work;
-    int dfd, ret = -1;
+    int dfd, ret;
     bool first = true;
     unsigned long err = -EPERM;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return -1;
+        return 0;
 
-    dfd = (int)the_regs->di;
-    filename = (struct filename *)the_regs->si;
+    dfd = (int)regs->di;
+    filename = (struct filename *)regs->si;
 
 filename2:
     if (IS_ERR_OR_NULL(filename))
-        return -1;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        return -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        return 0;
     }
 
     ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
-    if (ret && ret != -2)
+    if (ret)
     {
-        pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, dfd, filename->name, ret);
+        if (ret != -2)
+            pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->symbol_name, dfd, filename->name, ret);
         goto out_free_path;
     }
 
     if (check_path_or_parent_dir(target_path))
     {
-        ret = -1;
         if (first)
         {
             first = false;
-            dfd = (int)the_regs->dx;
-            filename = (struct filename *)the_regs->cx;
+            dfd = (int)regs->dx;
+            filename = (struct filename *)regs->cx;
             goto filename2;
         }
         goto out_put_path;
     }
 
-    the_regs->di = err;
-    memcpy(&(the_regs->si), &(err), sizeof(unsigned long));
+    regs->di = err;
+    memcpy(&(regs->si), &(err), sizeof(unsigned long));
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        ret = 0;
         goto out_put_path;
     }
     memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
@@ -441,13 +439,12 @@ filename2:
     if (!the_log_work)
     {
         pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
     if (!ret)
-        return -1;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -457,31 +454,31 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-    return -1;
+    return 0;
 }
 
-static int do_mkdirat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path, dfd_path;
     struct filename *filename;
     struct file *f;
     log_work *the_log_work;
-    int dfd, ret = -1;
+    int dfd, ret;
     char *buf, *last;
     unsigned long err = -EPERM;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return -1;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        return -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        return 0;
     }
 
-    dfd = (int)the_regs->di;
-    filename = (struct filename *)the_regs->si;
+    dfd = (int)regs->di;
+    filename = (struct filename *)regs->si;
 
     if (IS_ERR_OR_NULL(filename))
         goto out_free_path;
@@ -489,8 +486,7 @@ static int do_mkdirat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
     buf = kmalloc(strlen(filename->name), GFP_ATOMIC);
     if (!buf)
     {
-        pr_err("%s: %s failed memory allocation for filename->name buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        ret = -ENOMEM;
+        pr_err("%s: %s failed memory allocation for filename->name buffer\n", MODNAME, ri->symbol_name);
         goto out_free_path;
     }
     memcpy(buf, filename->name, strlen(filename->name) + 1);
@@ -508,7 +504,7 @@ static int do_mkdirat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
             f = fget(dfd);
             if (IS_ERR(f))
             {
-                pr_err("%s: %s can not get struct file\n", MODNAME, ri->rph->rp->kp.symbol_name);
+                pr_err("%s: %s can not get struct file\n", MODNAME, ri->symbol_name);
                 kfree(buf);
                 goto out_free_path;
             }
@@ -543,25 +539,25 @@ static int do_mkdirat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
     }
     kfree(buf);
 
-    if (ret && ret != -2)
+    if (ret)
     {
-        pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, dfd, (const char __user *)the_regs->si, ret);
+        if (ret != -2)
+            pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->symbol_name, dfd, (const char __user *)regs->si, ret);
         goto out_free_path;
     }
 
     if (check_path(target_path))
     {
-        ret = -1;
         goto out_put_path;
     }
 
-    the_regs->di = 0UL;
-    memcpy(&(the_regs->si), &(err), sizeof(unsigned long));
+    regs->di = 0UL;
+    memcpy(&(regs->si), &(err), sizeof(unsigned long));
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
         goto out_put_path;
     }
     memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
@@ -572,13 +568,12 @@ static int do_mkdirat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
     if (!the_log_work)
     {
         pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
     if (!ret)
-        return -1;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -588,10 +583,10 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-    return -1;
+    return 0;
 }
 
-static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path, dfd_path;
     struct open_how *how;
@@ -599,26 +594,26 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
 
     char *buf, *last;
     log_work *the_log_work;
-    int dfd, flags, ret = -1;
+    int dfd, flags, ret;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return -1;
+        return 0;
 
-    dfd = (int)the_regs->di;
-    how = (struct open_how *)the_regs->dx;
+    dfd = (int)regs->di;
+    how = (struct open_how *)regs->dx;
     flags = how->flags;
 
     if (((flags & O_ACCMODE) == O_RDONLY) && ((flags & O_CREAT) != O_CREAT))
-        return -1;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        return -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        return 0;
     }
 
-    ret = user_path_at(dfd, (const char __user *)the_regs->si, LOOKUP_FOLLOW, target_path);
+    ret = user_path_at(dfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
     if (!ret)
         goto check;
     else if ((flags & O_CREAT) == O_CREAT)
@@ -626,14 +621,13 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
         buf = kmalloc(PATH_MAX, GFP_ATOMIC);
         if (!buf)
         {
-            pr_err("%s: %s failed memory allocation for filename buffer\n", MODNAME, ri->rph->rp->kp.symbol_name);
-            ret = -ENOMEM;
+            pr_err("%s: %s failed memory allocation for filename buffer\n", MODNAME, ri->symbol_name);
             goto out_free_path;
         }
-        ret = strncpy_from_user(buf, (const char __user *)the_regs->si, PATH_MAX);
+        ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
         if (ret < 0)
         {
-            pr_err("%s: %s failed strncpy_from_user filename\n", MODNAME, ri->rph->rp->kp.symbol_name);
+            pr_err("%s: %s failed strncpy_from_user filename\n", MODNAME, ri->symbol_name);
             kfree(buf);
             goto out_free_path;
         }
@@ -653,7 +647,6 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
                 memcpy(target_path, &(f->f_path), sizeof(struct path));
                 fput(f);
                 path_get(target_path);
-                ret = 0;
             }
         }
         else if (buf[0] == '/') // absolute path
@@ -682,26 +675,24 @@ static int do_sys_openat2_entry_handler(struct kretprobe_instance *ri, struct pt
         kfree(buf);
     }
 
-    if (ret && ret != -2)
+    if (ret)
     {
-        pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->rph->rp->kp.symbol_name, dfd, (const char __user *)the_regs->si, ret);
+        if (ret != -2)
+            pr_err("%s: %s cannot resolving target path with dfd %d and name %s - err %d\n", MODNAME, ri->symbol_name, dfd, (const char __user *)regs->si, ret);
         goto out_free_path;
     }
 
 check:
     if (check_path(target_path))
-    {
-        ret = -1;
         goto out_put_path;
-    }
 
-    the_regs->di = 0UL;
-    the_regs->si = 0UL;
+    regs->di = 0UL;
+    regs->si = 0UL;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
         goto out_put_path;
     }
     memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
@@ -712,13 +703,12 @@ check:
     if (!the_log_work)
     {
         pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
+    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
     if (!ret)
-        return -1;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -728,37 +718,37 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-    return -1;
+    return 0;
 }
 
-static int file_open_root_entry_handler(struct kretprobe_instance *ri, struct pt_regs *the_regs)
+static int file_open_root_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path;
     char *filename;
     log_work *the_log_work;
-    int flags, ret = -1;
+    int flags;
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return -1;
+        return 0;
 
-    target_path = (struct path *)the_regs->di;
-    filename = (char *)the_regs->si;
-    flags = the_regs->dx;
+    target_path = (struct path *)regs->di;
+    filename = (char *)regs->si;
+    flags = regs->dx;
 
     if ((flags & O_ACCMODE) == O_RDONLY)
-        return -1;
+        return 0;
 
     if (check_path(target_path))
-        return -1;
+        return 0;
 
-    the_regs->di = 0UL;
-    the_regs->si = 0UL;
+    regs->di = 0UL;
+    regs->si = 0UL;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
     {
-        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->rph->rp->kp.symbol_name);
-        return -ENOMEM;
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        return 0;
     }
     memcpy(exe_path, &current->mm->exe_file->f_path, sizeof(struct path));
     path_get(exe_path);
@@ -768,65 +758,57 @@ static int file_open_root_entry_handler(struct kretprobe_instance *ri, struct pt
     if (!the_log_work)
     {
         pr_err("%s: failed memory allocation for log_work\n", MODNAME);
-        ret = -ENOMEM;
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->rph->rp->kp.symbol_name, target_path, exe_path);
-    if (!ret)
-        return -1;
+    if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
     path_put(exe_path);
     kfree(exe_path);
-    return -1;
+    return 0;
 }
 
-int register_hooks(void)
+int register_wrappers(void)
 {
     int i, ret;
 
-    kretprobes[0].kp.symbol_name = do_unlinkat;
-    kretprobes[0].entry_handler = (kretprobe_handler_t)do_general_entry_handler;
-    kretprobes[0].maxactive = -1;
+    kprobes[0].symbol_name = do_unlinkat;
+    kprobes[0].pre_handler = do_general_wrapper;
 
-    kretprobes[1].kp.symbol_name = do_rmdir;
-    kretprobes[1].entry_handler = (kretprobe_handler_t)do_general_entry_handler;
-    kretprobes[1].maxactive = -1;
+    kprobes[1].symbol_name = do_rmdir;
+    kprobes[1].pre_handler = do_general_wrapper;
 
-    kretprobes[2].kp.symbol_name = do_renameat2;
-    kretprobes[2].entry_handler = (kretprobe_handler_t)do_renameat2_entry_handler;
-    kretprobes[2].maxactive = -1;
+    kprobes[2].symbol_name = do_renameat2;
+    kprobes[2].pre_handler = do_renameat2_wrapper;
 
-    kretprobes[3].kp.symbol_name = do_mkdirat;
-    kretprobes[3].entry_handler = (kretprobe_handler_t)do_mkdirat_entry_handler;
-    kretprobes[3].maxactive = -1;
+    kprobes[3].symbol_name = do_mkdirat;
+    kprobes[3].pre_handler = do_mkdirat_wrapper;
 
-    kretprobes[4].kp.symbol_name = do_sys_openat2;
-    kretprobes[4].entry_handler = (kretprobe_handler_t)do_sys_openat2_entry_handler;
-    kretprobes[4].maxactive = -1;
+    kprobes[4].symbol_name = do_sys_openat2;
+    kprobes[4].pre_handler = do_sys_openat2_wrapper;
 
-    kretprobes[5].kp.symbol_name = file_open_root;
-    kretprobes[5].entry_handler = (kretprobe_handler_t)file_open_root_entry_handler;
-    kretprobes[5].maxactive = -1;
+    kprobes[5].symbol_name = file_open_root;
+    kprobes[5].pre_handler = file_open_root_wrapper;
 
-    for (i = 0; i < HOOKS; i++)
+    for (i = 0; i < WRAPPERS; i++)
     {
-        ret = register_kretprobe(&kretprobes[i]);
+        ret = register_kprobe(&kprobes[i]);
         if (ret)
-            pr_err("%s: kretprobes %s register failed, error %d\n", MODNAME, kretprobes[i].kp.symbol_name, ret);
+            pr_err("%s: kprobes %s register failed, error %d\n", MODNAME, kprobes[i].symbol_name, ret);
         else
-            pr_info("%s: kretprobes %s register success\n", MODNAME, kretprobes[i].kp.symbol_name);
+            pr_info("%s: kprobes %s register success\n", MODNAME, kprobes[i].symbol_name);
     }
 
     return ret;
 }
 
-void unregister_hooks(void)
+void unregister_wrappers(void)
 {
     int i;
 
-    for (i = 0; i < HOOKS; i++)
-        unregister_kretprobe(&kretprobes[i]);
+    for (i = 0; i < WRAPPERS; i++)
+        unregister_kprobe(&kprobes[i]);
 }

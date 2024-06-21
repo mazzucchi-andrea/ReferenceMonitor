@@ -2,9 +2,6 @@
     "files.associations": {
         "logfilefs.h": "c",
         "reference_monitor.h": "c",
-        "types.h": "c",
-        "limits.h": "c",
-        "syscall.h": "c"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/gcc"
 }

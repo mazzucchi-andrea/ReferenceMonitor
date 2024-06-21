@@ -27,25 +27,25 @@ int main(void)
 
     printf("Test Change State No Root\n");
 
-    ret = syscall(156, saved_password, OFF);
+    ret = syscall(134, saved_password, OFF);
     if (ret == -EPERM)
         printf("Test Change State No Root OFF Passed\n");
     else
         printf("Test Change State No Root OFF Failed %d\n", ret);
 
-    ret = syscall(156, saved_password, ON);
+    ret = syscall(134, saved_password, ON);
     if (ret == -EPERM)
         printf("Test Change State No Root ON Passed\n");
     else
         printf("Test Change State No Root ON Failed %d\n", ret);
 
-    ret = syscall(156, saved_password, REC_ON);
+    ret = syscall(134, saved_password, REC_ON);
     if (ret == -EPERM)
         printf("Test Change State No Root REC_ON Passed\n");
     else
         printf("Test Change State No Root REC_ON Failed %d\n", ret);
 
-    ret = syscall(156, saved_password, REC_OFF);
+    ret = syscall(134, saved_password, REC_OFF);
     if (ret == -EPERM)
         printf("Test Change State No Root REC_OFF Passed\n");
     else
@@ -57,13 +57,13 @@ int main(void)
 
     printf("Test Edit Paths No Root\n");
 
-    ret = syscall(174, saved_password, test_file_path, ADD);
+    ret = syscall(156, saved_password, test_file_path, ADD);
     if (ret == -EPERM)
         printf("Test Edit Paths No Root ADD Passed\n");
     else
         printf("Test Edit Paths No Root ADD Failed %d\n", ret);
 
-    ret = syscall(174, saved_password, test_file_path, REMOVE);
+    ret = syscall(156, saved_password, test_file_path, REMOVE);
     if (ret == -EPERM)
         printf("Test Edit Paths No Root REMOVE Passed \n");
     else
@@ -71,7 +71,7 @@ int main(void)
 
     printf("Test Change Password No Root\n");
 
-    ret = syscall(177, saved_password, new_password);
+    ret = syscall(174, saved_password, new_password);
     if (ret == -EPERM)
         printf("Test Change Password No Root Passed \n");
     else

@@ -19,7 +19,7 @@ int main() {
     }
 
     // add test_file_path to protected paths
-    if (syscall(174, saved_password, test_file_path, 1) == -1)
+    if (syscall(156, saved_password, test_file_path, 1) == -1)
     {
         printf("edit_paths failed with error %d\n", errno);
         return -errno;
@@ -27,7 +27,7 @@ int main() {
     printf("%s removed from Reference Monitor\n", test_file_path);
 
     // add test_dir_path to protected paths
-    if (syscall(174, saved_password, test_dir_relative_path, 1) == -1)
+    if (syscall(156, saved_password, test_dir_relative_path, 1) == -1)
     {
         printf("edit_paths failed with error %d\n", errno);
         return -errno;

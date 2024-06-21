@@ -39,7 +39,7 @@ void change_state()
         return;
     }
 
-    ret = syscall(156, saved_password, state);
+    ret = syscall(134, saved_password, state);
     if (ret < 0)
     {
         printf("change_state failed with error %d\n", ret);
@@ -70,7 +70,7 @@ void edit_path()
     printf("Enter the path (up to %d characters): ", PATH_MAX_LEN - 1);
     scanf("%4095s", path);
 
-    ret = syscall(174, saved_password, path, mode);
+    ret = syscall(156, saved_password, path, mode);
     if (ret < 0)
     {
         printf("edit_path failed with error %d\n", ret);
@@ -88,7 +88,7 @@ void change_password()
     printf("Enter the new password (up to %d characters): ", PASSWORD_MAX_LEN);
     scanf("%64s", new_password);
 
-    ret = syscall(177, saved_password, new_password);
+    ret = syscall(174, saved_password, new_password);
     if (ret < 0)
     {
         printf("change_password failed with error %d\n", ret);

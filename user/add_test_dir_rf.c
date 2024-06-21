@@ -19,7 +19,7 @@ int main(void)
     }
 
     // add test_dir_path to protected paths
-    if (syscall(174, saved_password, test_dir, 0))
+    if (syscall(156, saved_password, test_dir, 0))
     {
         printf("edit_paths failed with error %d\n", errno);
         return -errno;

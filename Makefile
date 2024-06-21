@@ -1,8 +1,7 @@
 obj-m += the_reference_monitor.o
-the_reference_monitor-objs += reference_monitor.o lib/scth.o file.o dir.o paths_list.o hooks.o
+the_reference_monitor-objs += reference_monitor.o lib/scth.o lib/vtpmo.o lib/usctm.o file.o dir.o paths_list.o wrappers.o
 
-A = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
-B = the_password
+A = the_password
 
 all:
 	gcc logfilemakefs.c -o logfilemakefs
@@ -15,7 +14,7 @@ clean:
 	rm image
 
 load:
-	insmod the_reference_monitor.ko the_syscall_table=$(A) the_password=$(B)
+	insmod the_reference_monitor.ko the_password=$(A)
 
 unload:
 	rmmod the_reference_monitor.ko

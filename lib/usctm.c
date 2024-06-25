@@ -50,7 +50,7 @@ MODULE_DESCRIPTION("USCTM");
 
 extern int sys_vtpmo(unsigned long vaddr);
 
-#define LIBNAME "SCTH"
+#define LIBNAME "USCTM"
 
 #define ADDRESS_MASK 0xfffffffffffff000//to migrate
 

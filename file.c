@@ -1,3 +1,5 @@
+#include <linux/buffer_head.h>
+
 #include "logfilefs.h"
 #include "reference_monitor.h"
 

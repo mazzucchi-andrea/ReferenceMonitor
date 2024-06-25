@@ -1,19 +1,12 @@
 #define EXPORT_SYMTAB
-#include <linux/blk_types.h>
+#include <crypto/hash.h>
 #include <linux/blkdev.h>
-#include <linux/cdev.h>
-#include <linux/cred.h>
-#include <linux/device.h>
+#include <linux/buffer_head.h>
 #include <linux/genhd.h>
-#include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/mutex.h>
-#include <linux/sched.h>
+#include <linux/module.h>
+#include <linux/namei.h>
 #include <linux/syscalls.h>
-#include <linux/time.h>
-#include <linux/timekeeping.h>
 #include <linux/version.h>
-#include <linux/vmalloc.h>
 
 #include "lib/include/scth.h"
 #include "lib/include/usctm.h"
@@ -593,7 +586,7 @@ int init_module(void)
 {
         int i, ret;
 
-        if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0))
+        if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0) || (LINUX_VERSION_CODE > KERNEL_VERSION(5, 15, 150)))
         {
                 pr_notice("%s: unsupported kernel version", MODNAME);
                 return -1;
@@ -620,12 +613,6 @@ int init_module(void)
                 return ret;
         }
 
-        AUDIT
-        {
-                pr_info("%s: reference_monitor received sys_call_table address %px\n", MODNAME, (void *)sys_call_table_address);
-                pr_info("%s: initializing - hacked entries %d\n", MODNAME, HACKED_ENTRIES);
-        }
-
         new_sys_call_array[0] = (unsigned long)sys_change_state;
         new_sys_call_array[1] = (unsigned long)sys_edit_paths;
         new_sys_call_array[2] = (unsigned long)sys_change_password;
@@ -641,9 +628,7 @@ int init_module(void)
         unprotect_memory();
 
         for (i = 0; i < HACKED_ENTRIES; i++)
-        {
                 ((unsigned long *)sys_call_table_address)[restore[i]] = (unsigned long)new_sys_call_array[i];
-        }
 
         protect_memory();
 
@@ -658,9 +643,7 @@ int init_module(void)
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
-        {
                 pr_info("%s: sucessfully registered logfilefs\n", MODNAME);
-        }
         else
         {
                 pr_err("%s: failed to register logfilefs - error %d", MODNAME, ret);
@@ -675,9 +658,7 @@ int init_module(void)
 
         ret = register_wrappers();
         if (likely(ret == 0))
-        {
                 pr_info("%s: sucessfully registered wrappers\n", MODNAME);
-        }
         else
         {
                 pr_err("%s: failed to register wrappers - error %d", MODNAME, ret);

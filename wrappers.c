@@ -1,9 +1,11 @@
-#include <linux/kprobes.h>
+#include <crypto/hash.h>
+#include <linux/atomic.h>
 #include <linux/dcache.h>
-#include <linux/fdtable.h>
 #include <linux/file.h>
-#include <linux/uidgid.h>
 #include <linux/fs_struct.h>
+#include <linux/kprobes.h>
+#include <linux/module.h>
+#include <linux/namei.h>
 
 #include "reference_monitor.h"
 #include "path_list.h"
@@ -19,10 +21,11 @@
 
 #define WRAPPERS 6
 
+unsigned long err = -EPERM;
+
 typedef struct _log_work
 {
     struct work_struct the_work;
-    struct tm tm_violation;
     kgid_t gid;
     pid_t ttid;
     kuid_t uid;
@@ -141,7 +144,7 @@ void logger(unsigned long data)
     u8 checksum[SHA256_DIGEST_SIZE] = {0};
     int ret, len;
     char *log_entry, *checksum_hex, *target_pathname, *exe_pathname, *buf_target, *buf_exe;
-    char *log_entry_base = "%d-%02d-%02d\t%02d:%02d:%02d\t%s\n"
+    char *log_entry_base = "%s\n"
                            "gid:\t%d\n"
                            "ttid:\t%d\n"
                            "uid:\t%d\n"
@@ -150,7 +153,7 @@ void logger(unsigned long data)
                            "exe_file:\t%s\n"
                            "%s\n";
 
-    if (!is_mounted())
+    if (atomic_read(&fs_mounted))
         goto out_free_work;
 
     buf_target = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
@@ -204,12 +207,6 @@ void logger(unsigned long data)
 skip_checksum:
     // get log entry length
     len = snprintf(NULL, 0, log_entry_base,
-                   work_data->tm_violation.tm_year + 1900,
-                   work_data->tm_violation.tm_mon + 1,
-                   work_data->tm_violation.tm_mday,
-                   work_data->tm_violation.tm_hour,
-                   work_data->tm_violation.tm_min,
-                   work_data->tm_violation.tm_sec,
                    work_data->target_func,
                    work_data->gid,
                    work_data->ttid,
@@ -233,12 +230,6 @@ skip_checksum:
     }
 
     ret = snprintf(log_entry, len + 1, log_entry_base,
-                   work_data->tm_violation.tm_year + 1900,
-                   work_data->tm_violation.tm_mon + 1,
-                   work_data->tm_violation.tm_mday,
-                   work_data->tm_violation.tm_hour,
-                   work_data->tm_violation.tm_min,
-                   work_data->tm_violation.tm_sec,
                    work_data->target_func,
                    work_data->gid,
                    work_data->ttid,
@@ -276,11 +267,8 @@ out_free_work:
     module_put(THIS_MODULE);
 }
 
-int schedule_log_work(log_work *the_log_work, const char *target_func, struct path *target_path, struct path *exe_path)
+static inline int schedule_log_work(log_work *the_log_work, const char *target_func, struct path *target_path, struct path *exe_path)
 {
-    struct timespec64 now;
-    struct tm tm_now;
-
     the_log_work->target_func = target_func;
     the_log_work->gid = current->cred->gid;
     the_log_work->ttid = task_pid_vnr(current);
@@ -288,10 +276,6 @@ int schedule_log_work(log_work *the_log_work, const char *target_func, struct pa
     the_log_work->euid = current->cred->euid;
     the_log_work->target_path = target_path;
     the_log_work->exe_path = exe_path;
-
-    ktime_get_real_ts64(&now);
-    time64_to_tm(now.tv_sec, 0, &tm_now);
-    the_log_work->tm_violation = tm_now;
 
     INIT_WORK(&(the_log_work->the_work), (void *)logger);
     if (!queue_work(log_queue, &(the_log_work->the_work)))
@@ -309,22 +293,23 @@ static int do_general_wrapper(struct kprobe *ri, struct pt_regs *regs)
     struct filename *filename;
     log_work *the_log_work;
     int dfd, ret;
-    unsigned long err = -EPERM;
+
+    preempt_disable();
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return 0;
+        goto out;
 
     dfd = (int)regs->di;
     filename = (struct filename *)regs->si;
 
-    if (IS_ERR_OR_NULL(filename))
-        return 0;
+    if (IS_ERR(filename))
+        goto out;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        return 0;
+        goto out;
     }
 
     ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
@@ -336,12 +321,13 @@ static int do_general_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (check_path_or_parent_dir(target_path))
-    {
         goto out_put_path;
-    }
 
     regs->di = err;
     memcpy(&(regs->si), &(err), sizeof(unsigned long));
+
+    if (atomic_read(&fs_mounted))
+        goto out_put_path;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
@@ -360,9 +346,8 @@ static int do_general_wrapper(struct kprobe *ri, struct pt_regs *regs)
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
-    if (!ret)
-        return 0;
+    if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
+        goto out;
 
     kfree(the_log_work);
 out_free_exe:
@@ -372,6 +357,8 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
+out:
+    preempt_enable();
     return 0;
 }
 
@@ -382,24 +369,27 @@ static int do_renameat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
     log_work *the_log_work;
     int dfd, ret;
     bool first = true;
-    unsigned long err = -EPERM;
+
+    preempt_disable();
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return 0;
+        goto out;
 
     dfd = (int)regs->di;
     filename = (struct filename *)regs->si;
 
-filename2:
-    if (IS_ERR_OR_NULL(filename))
-        return 0;
-
+newname:
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        return 0;
+        goto out;
     }
+
+    if (IS_ERR(filename))
+        goto out_free_path;
+
+    // pr_notice("%s: dfd %d - filename %s\n", MODNAME, dfd, filename->name);
 
     ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
     if (ret)
@@ -416,13 +406,18 @@ filename2:
             first = false;
             dfd = (int)regs->dx;
             filename = (struct filename *)regs->cx;
-            goto filename2;
+            path_put(target_path);
+            kfree(target_path);
+            goto newname;
         }
         goto out_put_path;
     }
 
     regs->di = err;
     memcpy(&(regs->si), &(err), sizeof(unsigned long));
+
+    if (atomic_read(&fs_mounted))
+        goto out_put_path;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
@@ -444,7 +439,10 @@ filename2:
 
     ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
     if (!ret)
-        return 0;
+    {
+        // pr_notice("%s: dfd %d - filename %s log_work scheduled\n", MODNAME, dfd, filename->name);
+        goto out;
+    }
 
     kfree(the_log_work);
 out_free_exe:
@@ -454,6 +452,8 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
+out:
+    preempt_enable();
     return 0;
 }
 
@@ -464,32 +464,38 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
     struct file *f;
     log_work *the_log_work;
     int dfd, ret;
+    size_t len;
     char *buf, *last;
-    unsigned long err = -EPERM;
+
+    preempt_disable();
 
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return 0;
+        goto out;
+
+    dfd = (int)regs->di;
+    filename = (struct filename *)regs->si;
+
+    if (IS_ERR(filename))
+        goto out;
+
+    len = strlen(filename->name);
+    if (len == 0)
+        goto out;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        return 0;
+        goto out;
     }
 
-    dfd = (int)regs->di;
-    filename = (struct filename *)regs->si;
-
-    if (IS_ERR_OR_NULL(filename))
-        goto out_free_path;
-
-    buf = kmalloc(strlen(filename->name), GFP_ATOMIC);
+    buf = (char *)kmalloc(len + 1, GFP_ATOMIC);
     if (!buf)
     {
         pr_err("%s: %s failed memory allocation for filename->name buffer\n", MODNAME, ri->symbol_name);
         goto out_free_path;
     }
-    memcpy(buf, filename->name, strlen(filename->name) + 1);
+    memcpy(buf, filename->name, len + 1);
 
     last = strrchr(buf, '/');
     if (!last) // only filename
@@ -502,15 +508,15 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
         else
         {
             f = fget(dfd);
-            if (IS_ERR(f))
+            if (!f)
             {
                 pr_err("%s: %s can not get struct file\n", MODNAME, ri->symbol_name);
                 kfree(buf);
                 goto out_free_path;
             }
             memcpy(target_path, &(f->f_path), sizeof(struct path));
-            fput(f);
             path_get(target_path);
+            fput(f);
             ret = 0;
         }
     }
@@ -527,7 +533,7 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
         else
         {
             f = fget(dfd);
-            if (IS_ERR(f))
+            if (!f)
             {
                 kfree(buf);
                 goto out_free_path;
@@ -547,12 +553,13 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (check_path(target_path))
-    {
         goto out_put_path;
-    }
 
-    regs->di = 0UL;
+    regs->di = err;
     memcpy(&(regs->si), &(err), sizeof(unsigned long));
+
+    if (atomic_read(&fs_mounted))
+        goto out_put_path;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
@@ -571,9 +578,8 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
-    if (!ret)
-        return 0;
+    if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
+        goto out;
 
     kfree(the_log_work);
 out_free_exe:
@@ -583,51 +589,51 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
+out:
+    preempt_enable();
     return 0;
 }
 
 static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path, dfd_path;
-    struct open_how *how;
     struct file *f;
-
     char *buf, *last;
     log_work *the_log_work;
     int dfd, flags, ret;
 
+    preempt_disable();
+
     if (monitor_state == OFF || monitor_state == REC_OFF)
-        return 0;
+        goto out;
 
     dfd = (int)regs->di;
-    how = (struct open_how *)regs->dx;
-    flags = how->flags;
+    flags = ((struct open_how *)regs->dx)->flags;
 
-    if (((flags & O_ACCMODE) == O_RDONLY) && ((flags & O_CREAT) != O_CREAT))
-        return 0;
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
+        goto out;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        return 0;
+        goto out;
     }
 
     ret = user_path_at(dfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
-    if (!ret)
-        goto check;
-    else if ((flags & O_CREAT) == O_CREAT)
+    if (ret && (flags & O_CREAT))
     {
-        buf = kmalloc(PATH_MAX, GFP_ATOMIC);
+        buf = (char *)kmalloc(PATH_MAX, GFP_ATOMIC);
         if (!buf)
         {
             pr_err("%s: %s failed memory allocation for filename buffer\n", MODNAME, ri->symbol_name);
             goto out_free_path;
         }
         ret = strncpy_from_user(buf, (const char __user *)regs->si, PATH_MAX);
-        if (ret < 0)
+        if (ret <= 0)
         {
-            pr_err("%s: %s failed strncpy_from_user filename\n", MODNAME, ri->symbol_name);
+            if (!ret)
+                pr_err("%s: %s failed strncpy_from_user filename\n", MODNAME, ri->symbol_name);
             kfree(buf);
             goto out_free_path;
         }
@@ -635,18 +641,22 @@ static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
         if (!last) // only filename
         {
             if (dfd == AT_FDCWD)
+            {
                 get_fs_pwd(current->fs, target_path);
+                ret = 0;
+            }
             else
             {
                 f = fget(dfd);
-                if (IS_ERR(f))
+                if (!f)
                 {
                     kfree(buf);
                     goto out_free_path;
                 }
                 memcpy(target_path, &(f->f_path), sizeof(struct path));
-                fput(f);
                 path_get(target_path);
+                fput(f);
+                ret = 0;
             }
         }
         else if (buf[0] == '/') // absolute path
@@ -662,7 +672,7 @@ static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
             else
             {
                 f = fget(dfd);
-                if (IS_ERR(f))
+                if (!f)
                 {
                     kfree(buf);
                     goto out_free_path;
@@ -682,12 +692,14 @@ static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
         goto out_free_path;
     }
 
-check:
     if (check_path(target_path))
         goto out_put_path;
 
-    regs->di = 0UL;
-    regs->si = 0UL;
+    regs->di = (unsigned long)NULL;
+    regs->si = (unsigned long)NULL;
+
+    if (atomic_read(&fs_mounted))
+        goto out_put_path;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
@@ -706,9 +718,8 @@ check:
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
-    if (!ret)
-        return 0;
+    if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
+        goto out;
 
     kfree(the_log_work);
 out_free_exe:
@@ -718,31 +729,45 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
+out:
+    preempt_enable();
     return 0;
 }
 
 static int file_open_root_wrapper(struct kprobe *ri, struct pt_regs *regs)
 {
     struct path *target_path, *exe_path;
-    char *filename;
     log_work *the_log_work;
     int flags;
 
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        return 0;
+    preempt_disable();
 
-    target_path = (struct path *)regs->di;
-    filename = (char *)regs->si;
+    if (monitor_state == OFF || monitor_state == REC_OFF)
+        goto out;
+
     flags = regs->dx;
 
-    if ((flags & O_ACCMODE) == O_RDONLY)
-        return 0;
+    if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
+        goto out;
+
+    target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
+    if (!target_path)
+    {
+        pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
+        goto out;
+    }
+
+    memcpy(target_path, (struct path *)regs->di, sizeof(struct path));
+    path_get(target_path);
 
     if (check_path(target_path))
-        return 0;
+        goto out_put_path;
 
-    regs->di = 0UL;
-    regs->si = 0UL;
+    regs->di = (unsigned long)NULL;
+    regs->si = (unsigned long)NULL;
+
+    if (atomic_read(&fs_mounted))
+        goto out_put_path;
 
     exe_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!exe_path)
@@ -762,12 +787,17 @@ static int file_open_root_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
-        return 0;
+        goto out;
 
     kfree(the_log_work);
 out_free_exe:
     path_put(exe_path);
     kfree(exe_path);
+out_put_path:
+    path_put(target_path);
+    kfree(target_path);
+out:
+    preempt_enable();
     return 0;
 }
 

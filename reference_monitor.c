@@ -25,8 +25,7 @@ module_param(the_password, charp, 0);
 // file system stuff
 struct super_block *device_sb;
 DECLARE_RWSEM(log_rw);
-DEFINE_SPINLOCK(fs_spinlock);
-bool fs_mounted = false;
+atomic_t fs_mounted;
 
 unsigned long the_ni_syscall;
 unsigned long new_sys_call_array[] = {0x0, 0x0, 0x0};
@@ -44,7 +43,7 @@ int hash_password(const char *password, size_t password_len, u8 *hash)
         int ret = -ENOMEM;
         u8 *digest;
 
-        tfm = crypto_alloc_shash("sha256", 0, 0);
+        tfm = crypto_alloc_shash(SHA256, 0, 0);
         if (IS_ERR(tfm))
         {
                 pr_err("%s: unable to allocate crypto hash\n", MODNAME);
@@ -386,13 +385,8 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
 
 static void logfilefs_kill_superblock(struct super_block *s)
 {
-        unsigned long flags;
-
         down_write(&log_rw);
-
-        spin_lock_irqsave(&fs_spinlock, flags);
-        fs_mounted = false;
-        spin_unlock_irqrestore(&fs_spinlock, flags);
+        atomic_set(&fs_mounted, -1);
         device_sb = NULL;
 
         kill_block_super(s);
@@ -407,7 +401,6 @@ static void logfilefs_kill_superblock(struct super_block *s)
 struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data)
 {
         struct dentry *ret;
-        unsigned long irq_flags;
 
         down_write(&log_rw);
 
@@ -422,9 +415,7 @@ struct dentry *logfilefs_mount(struct file_system_type *fs_type, int flags, cons
         else
                 pr_info("%s: logfilefs is succesfully mounted on from device %s\n", MODNAME, dev_name);
 
-        spin_lock_irqsave(&fs_spinlock, irq_flags);
-        fs_mounted = true;
-        spin_unlock_irqrestore(&fs_spinlock, irq_flags);
+        atomic_set(&fs_mounted, 0);
         up_write(&log_rw);
 
         return ret;
@@ -469,36 +460,20 @@ loff_t logfilefs_get_file_size(void)
         return file_size;
 }
 
-bool is_mounted(void)
-{
-        bool ret = false;
-        unsigned long flags;
-        spin_lock_irqsave(&fs_spinlock, flags);
-        ret = fs_mounted;
-        spin_unlock_irqrestore(&fs_spinlock, flags);
-        return ret;
-}
-
 /*
  * Return: -ENODEV if logfilefs is not mounted, -EBUSY if lock is busy,
  * 0 on success
  */
 int try_log_write_lock(void)
 {
-        unsigned long flags;
-        int ret = 0;
-        spin_lock_irqsave(&fs_spinlock, flags);
-        if (fs_mounted)
+        if (!down_write_trylock(&log_rw))
+                return -EBUSY;
+        if (fs_mounted.counter)
         {
-                if (!down_write_trylock(&log_rw))
-                {
-                        ret = -EBUSY;
-                }
+                up_write(&log_rw);
+                return -ENODEV;
         }
-        else
-                ret = -ENODEV;
-        spin_unlock_irqrestore(&fs_spinlock, flags);
-        return ret;
+        return 0;
 }
 
 /*
@@ -507,18 +482,14 @@ int try_log_write_lock(void)
  */
 int try_log_read_lock(void)
 {
-        unsigned long flags;
-        int ret = 0;
-        spin_lock_irqsave(&fs_spinlock, flags);
-        if (fs_mounted)
+        if (!down_read_trylock(&log_rw))
+                return -EBUSY;
+        if (fs_mounted.counter)
         {
-                if (!down_read_trylock(&log_rw))
-                        ret = -EBUSY;
+                up_read(&log_rw);
+                return -ENODEV;
         }
-        else
-                ret = -ENODEV;
-        spin_unlock_irqrestore(&fs_spinlock, flags);
-        return ret;
+        return 0;
 }
 
 ssize_t write_logfilefs(char *data, size_t len)
@@ -545,7 +516,6 @@ ssize_t write_logfilefs(char *data, size_t len)
         // check file size
         if (file_size == maxbytes)
         {
-                // pr_err("%s: logfile is full\n", MODNAME);
                 up_write(&log_rw);
                 return -ENOSPC; // fs full
         }
@@ -643,15 +613,15 @@ int init_module(void)
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
+        {
                 pr_info("%s: sucessfully registered logfilefs\n", MODNAME);
+                atomic_set(&fs_mounted, -1);
+        }
         else
         {
                 pr_err("%s: failed to register logfilefs - error %d", MODNAME, ret);
                 return -1;
         }
-
-        // spinlock init
-        spin_lock_init(&fs_spinlock);
 
         // workqueue init
         log_queue = create_singlethread_workqueue("log_queue");

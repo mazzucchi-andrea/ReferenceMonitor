@@ -8,6 +8,7 @@
 // password max length including NULL terminator
 #define PASSWORD_MAX_LEN 65
 
+#define SHA256 "sha256"
 #define SHA256_DIGEST_SIZE 32
 
 #define ADD 0
@@ -18,12 +19,11 @@
 #define REC_ON 2
 #define REC_OFF 3
 
-extern bool fs_mounted;
+extern atomic_t fs_mounted;
 extern int8_t monitor_state;
 extern struct rw_semaphore log_rw;
 extern struct workqueue_struct *log_queue;
 
-bool is_mounted(void);
 int try_log_write_lock(void);
 int try_log_read_lock(void);
 ssize_t write_logfilefs(char *, size_t);

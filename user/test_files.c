@@ -469,7 +469,7 @@ int main(void)
         perror("Failed relative path resolution");
         exit(EXIT_FAILURE);
     }
-    printf("test_file_absolute_path %s\n", test_file_absolute_path);
+    //printf("test_file_absolute_path %s\n", test_file_absolute_path);
 
     test_dir_absolute_path = malloc(PATH_MAX);
     if (!test_dir_absolute_path)
@@ -482,7 +482,7 @@ int main(void)
         perror("Failed relative path resolution");
         exit(EXIT_FAILURE);
     }
-    printf("test_dir_absolute_path %s\n", test_dir_absolute_path);
+    //printf("test_dir_absolute_path %s\n", test_dir_absolute_path);
 
     dirfd = open(parent_dir_path, O_RDONLY);
     if (dirfd < 0)

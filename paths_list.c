@@ -113,6 +113,9 @@ void print_paths(void)
     struct path_entry *entry;
     char *buf, *pathname;
 
+    if (list_empty(&paths))
+        return;
+
     buf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
     if (!buf)
         return;

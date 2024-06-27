@@ -34,7 +34,8 @@ int restore[HACKED_ENTRIES] = {[0 ...(HACKED_ENTRIES - 1)] - 1};
 
 struct workqueue_struct *log_queue;
 
-int8_t monitor_state = REC_ON;
+DEFINE_MUTEX(monitor_lock);
+int monitor_state = REC_ON;
 
 int hash_password(const char *password, size_t password_len, u8 *hash)
 {
@@ -107,27 +108,20 @@ void print_current_monitor_state(void)
         switch (monitor_state)
         {
         case ON:
-                pr_info("%s: current state is ON.\n", MODNAME);
+                pr_info("%s: current state is ON\n", MODNAME);
                 break;
         case OFF:
-                pr_info("%s: current state is OFF.\n", MODNAME);
+                pr_info("%s: current state is OFF\n", MODNAME);
                 break;
         case REC_ON:
-                pr_info("%s: current state is REC_ON.\n", MODNAME);
+                pr_info("%s: current state is REC_ON\n", MODNAME);
                 break;
         case REC_OFF:
-                pr_info("%s: current state is REC_OFF.\n", MODNAME);
+                pr_info("%s: current state is REC_OFF\n", MODNAME);
                 break;
         default:
                 break;
         }
-}
-
-int check_rec_state(void)
-{
-        if (monitor_state == ON || monitor_state == OFF)
-                return -1;
-        return 0;
 }
 
 __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
@@ -136,11 +130,11 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
         long copied;
         char passwd_buf[PASSWORD_MAX_LEN];
 
-        pr_info("%s: _change_state called.\n", MODNAME);
+        pr_info("%s: _change_state called\n", MODNAME);
 
         if (check_root() < 0)
         {
-                pr_notice("%s: only root can change the monitor state.\n", MODNAME);
+                pr_notice("%s: only root can change the monitor state\n", MODNAME);
                 return -EPERM;
         }
 
@@ -152,36 +146,48 @@ __SYSCALL_DEFINEx(2, _change_state, const char __user *, password, int, state)
 
         if (check_password(passwd_buf) < 0)
         {
-                pr_notice("%s: invalid password.\n", MODNAME);
+                pr_notice("%s: invalid password\n", MODNAME);
                 return -1;
         }
+
+        mutex_lock(&monitor_lock);
 
         print_current_monitor_state();
 
         if (state < 0 || state > 3)
         {
-                pr_notice("%s: invalid state %d.\n", MODNAME, state);
-                return -1;
+                pr_notice("%s: invalid state %d\n", MODNAME, state);
+                ret = -EINVAL;
+                goto unlock;
         }
 
-        if ((state == ON || state == REC_ON) && (monitor_state == OFF || monitor_state == REC_OFF))
+        if (state == monitor_state)
         {
-                ret = register_wrappers();
-                if (unlikely(ret != 0))
-                        return ret;
+                ret = 0;
+                goto unlock;
+        }
+
+        if ((monitor_state & 1) && !(state & 1)) // OFF or REC_OFF to ON or REC_ON
+        {
+                ret = enable_wrappers();
+                if (ret)
+                        goto unlock;
                 refresh_list();
                 print_paths();
         }
-        else if ((state == OFF || state == REC_OFF) && (monitor_state == ON || monitor_state == REC_ON))
-                unregister_wrappers();
+        else if (!(monitor_state & 1) && (state & 1)) // ON or REC_ON to OFF or REC_OFF
+                disable_wrappers();
 
         monitor_state = state;
+        ret = 0;
 
-        pr_info("%s: state changed.\n", MODNAME);
+        pr_info("%s: state changed\n", MODNAME);
 
         print_current_monitor_state();
 
-        return 0;
+unlock:
+        mutex_unlock(&monitor_lock);
+        return ret;
 }
 
 __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __user *, path, int, mode)
@@ -191,24 +197,12 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
         int ret = 0;
         char passwd_buf[PASSWORD_MAX_LEN];
 
-        pr_info("%s: _edit_paths called.\n", MODNAME);
+        pr_info("%s: _edit_paths called\n", MODNAME);
 
         if (check_root() < 0)
         {
-                pr_notice("%s: only root can edit the monitor paths.\n", MODNAME);
+                pr_notice("%s: only root can edit the monitor paths\n", MODNAME);
                 return -EPERM;
-        }
-
-        if (mode != ADD && mode != REMOVE)
-        {
-                pr_notice("%s: invalid mode\n", MODNAME);
-                return -EINVAL;
-        }
-
-        if (check_rec_state() < 0)
-        {
-                pr_notice("%s: invalid monitor state.\n", MODNAME);
-                return -1;
         }
 
         copied = strncpy_from_user(passwd_buf, password, PASSWORD_MAX_LEN);
@@ -220,9 +214,24 @@ __SYSCALL_DEFINEx(3, _edit_paths, const char __user *, password, const char __us
 
         if (check_password(passwd_buf) < 0)
         {
-                pr_notice("%s: invalid password.\n", MODNAME);
+                pr_notice("%s: invalid password\n", MODNAME);
                 return -1;
         }
+
+        if (mode != ADD && mode != REMOVE)
+        {
+                pr_notice("%s: invalid mode\n", MODNAME);
+                return -EINVAL;
+        }
+
+        mutex_lock(&monitor_lock);
+        if (!(monitor_state & 2))
+        {
+                mutex_unlock(&monitor_lock);
+                pr_err("%s: monitor state is not REC_ON or REC_OFF\n", MODNAME);
+                return -1;
+        }
+        mutex_unlock(&monitor_lock);
 
         ret = user_path_at(AT_FDCWD, path, LOOKUP_FOLLOW, &_path);
         if (ret)
@@ -274,7 +283,7 @@ __SYSCALL_DEFINEx(2, _change_password, const char __user *, old_password, const 
 
         if (check_password(old_passwd_buf) < 0)
         {
-                pr_notice("%s: invalid password.\n", MODNAME);
+                pr_notice("%s: invalid password\n", MODNAME);
                 return -1;
         }
 
@@ -321,7 +330,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         bh = sb_bread(sb, SB_BLOCK_NUMBER);
         if (!sb)
         {
-                pr_err("%s: logfilefs super_block read failed.\n", MODNAME);
+                pr_err("%s: logfilefs super_block read failed\n", MODNAME);
                 return -EIO;
         }
         sb_disk = (struct logfilefs_sb_info *)bh->b_data;
@@ -331,7 +340,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         // check on the expected magic number
         if (magic != sb->s_magic)
         {
-                pr_err("%s: logfilefs wrong magic number.\n", MODNAME);
+                pr_err("%s: logfilefs wrong magic number\n", MODNAME);
                 return -EBADF;
         }
 
@@ -339,16 +348,16 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         sb->s_op = &logfilefs_super_ops; // set our own operations
 
         data_blocks = (long long int)(get_capacity(sb->s_bdev->bd_disk) * bdev_logical_block_size(sb->s_bdev) / DEFAULT_BLOCK_SIZE) - 2;
-        pr_info("%s: logfilefs data blocks number %lld.\n", MODNAME, data_blocks);
+        pr_info("%s: logfilefs data blocks number %lld\n", MODNAME, data_blocks);
 
         maxbytes = data_blocks * DEFAULT_BLOCK_SIZE;
         sb->s_maxbytes = maxbytes;
-        pr_info("%s: logfilefs maxbytes %lld.\n", MODNAME, maxbytes);
+        pr_info("%s: logfilefs maxbytes %lld\n", MODNAME, maxbytes);
 
         root_inode = iget_locked(sb, LOGFILEFS_ROOT_INODE_NUMBER); // get a root inode from cache
         if (!root_inode)
         {
-                pr_err("%s: logfilefs can not get root_inode.\n", MODNAME);
+                pr_err("%s: logfilefs can not get root_inode\n", MODNAME);
                 return -ENOMEM;
         }
 
@@ -369,7 +378,7 @@ int logfilefs_fill_super(struct super_block *sb, void *data, int silent)
         sb->s_root = d_make_root(root_inode);
         if (!sb->s_root)
         {
-                pr_err("%s: logfilefs d_make_root failed.\n", MODNAME);
+                pr_err("%s: logfilefs d_make_root failed\n", MODNAME);
                 return -ENOMEM;
         }
 
@@ -390,7 +399,7 @@ static void logfilefs_kill_superblock(struct super_block *s)
         device_sb = NULL;
 
         kill_block_super(s);
-        pr_info("%s: logfilefs unmount succesful.\n", MODNAME);
+        pr_info("%s: logfilefs unmount succesful\n", MODNAME);
 
         up_write(&log_rw);
 
@@ -468,7 +477,7 @@ int try_log_write_lock(void)
 {
         if (!down_write_trylock(&log_rw))
                 return -EBUSY;
-        if (fs_mounted.counter)
+        if (atomic_read(&fs_mounted))
         {
                 up_write(&log_rw);
                 return -ENODEV;
@@ -484,7 +493,7 @@ int try_log_read_lock(void)
 {
         if (!down_read_trylock(&log_rw))
                 return -EBUSY;
-        if (fs_mounted.counter)
+        if (atomic_read(&fs_mounted))
         {
                 up_read(&log_rw);
                 return -ENODEV;
@@ -558,28 +567,28 @@ int init_module(void)
 
         if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0) || (LINUX_VERSION_CODE > KERNEL_VERSION(5, 15, 150)))
         {
-                pr_notice("%s: unsupported kernel version", MODNAME);
+                pr_err("%s: unsupported kernel version", MODNAME);
                 return -1;
         };
 
         syscall_table_finder();
         if (sys_call_table_address == 0x0)
         {
-                pr_notice("%s: cannot manage sys_call_table address set to 0x0\n", MODNAME);
+                pr_err("%s: cannot manage sys_call_table address set to 0x0\n", MODNAME);
                 return -1;
         }
 
         ret = strlen(the_password);
-        if (ret <= 0)
+        if (ret <= 0 || ret > PASSWORD_MAX_LEN - 1)
         {
-                pr_notice("%s: invalid password length.\n", MODNAME);
-                return ret;
+                pr_err("%s: invalid password length\n", MODNAME);
+                return -EINVAL;
         }
 
         ret = hash_password(the_password, strlen(the_password), digest_password);
         if (ret)
         {
-                pr_err("%s: failed to hash password: %d\n", MODNAME, ret);
+                pr_err("%s: password hashing failed - err %d\n", MODNAME, ret);
                 return ret;
         }
 
@@ -610,54 +619,57 @@ int init_module(void)
                 pr_notice("%s: %s is at table entry %d\n", MODNAME, "_change_password", restore[2]);
         }
 
+        mutex_init(&monitor_lock);
+
         // register filesystem
         ret = register_filesystem(&logfilefs_type);
         if (likely(ret == 0))
         {
-                pr_info("%s: sucessfully registered logfilefs\n", MODNAME);
+                pr_notice("%s: sucessfully registered logfilefs\n", MODNAME);
                 atomic_set(&fs_mounted, -1);
         }
         else
         {
-                pr_err("%s: failed to register logfilefs - error %d", MODNAME, ret);
+                pr_err("%s: failed to register logfilefs - err %d\n", MODNAME, ret);
                 return -1;
         }
 
         // workqueue init
         log_queue = create_singlethread_workqueue("log_queue");
+        if (!log_queue)
+        {
+                pr_err("%s: failed to create logging workqueue\n", MODNAME);
+                return -1;
+        } else
+                pr_notice("%s: sucessfully created logging workqueue\n", MODNAME);
 
-        ret = register_wrappers();
+        ret = init_wrappers();
         if (likely(ret == 0))
-                pr_info("%s: sucessfully registered wrappers\n", MODNAME);
+                pr_notice("%s: sucessfully registered wrappers\n", MODNAME);
         else
         {
-                pr_err("%s: failed to register wrappers - error %d", MODNAME, ret);
+                pr_err("%s: failed to register wrappers - err %d\n", MODNAME, ret);
                 return -1;
         }
 
-        return ret;
+        return 0;
 }
 
 void cleanup_module(void)
 {
         int i, ret;
 
-        pr_info("%s: shutting down\n", MODNAME);
+        pr_notice("%s: shutting down\n", MODNAME);
 
         cleanup_list();
-        pr_info("%s: cleaning path list\n", MODNAME);
+        pr_notice("%s: paths list cleaned\n", MODNAME);
 
         // unregister filesystem
         ret = unregister_filesystem(&logfilefs_type);
         if (likely(ret == 0))
-                pr_info("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
+                pr_notice("%s: sucessfully unregistered logfilefs driver\n", MODNAME);
         else
-                pr_err("%s: failed to unregister logfilefs driver - error %d", MODNAME, ret);
-
-        destroy_workqueue(log_queue);
-
-        unregister_wrappers();
-        pr_info("%s: unregistered wrappers\n", MODNAME);
+                pr_err("%s: failed to unregister logfilefs driver - err %d", MODNAME, ret);
 
         unprotect_memory();
         for (i = 0; i < HACKED_ENTRIES; i++)
@@ -666,4 +678,13 @@ void cleanup_module(void)
         }
         protect_memory();
         pr_info("%s: sys-call table restored to its original content\n", MODNAME);
+
+        mutex_destroy(&monitor_lock);
+        pr_notice("%s. monitor mutex destroyed\n", MODNAME);
+
+        cleanup_wrappers();
+        pr_notice("%s: wrappers unregistered\n", MODNAME);
+
+        destroy_workqueue(log_queue);
+        pr_notice("%s. logging workqueue destroyed\n", MODNAME);
 }

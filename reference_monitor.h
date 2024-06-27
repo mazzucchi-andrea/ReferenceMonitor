@@ -20,7 +20,6 @@
 #define REC_OFF 3
 
 extern atomic_t fs_mounted;
-extern int8_t monitor_state;
 extern struct rw_semaphore log_rw;
 extern struct workqueue_struct *log_queue;
 

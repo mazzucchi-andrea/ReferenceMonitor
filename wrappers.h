@@ -1,7 +1,9 @@
 #ifndef HOOKS_H
 #define HOOKS_H
 
-int register_wrappers(void);
-void unregister_wrappers(void);
+int init_wrappers(void);
+void cleanup_wrappers(void);
+int enable_wrappers(void);
+void disable_wrappers(void);
 
 #endif

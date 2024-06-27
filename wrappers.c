@@ -4,7 +4,6 @@
 #include <linux/file.h>
 #include <linux/fs_struct.h>
 #include <linux/kprobes.h>
-#include <linux/module.h>
 #include <linux/namei.h>
 
 #include "reference_monitor.h"
@@ -20,6 +19,7 @@
 #define calc_enoent "program attempting the illegal operation no longer exists"
 
 #define WRAPPERS 6
+#define MAX_TRIES 10
 
 unsigned long err = -EPERM;
 
@@ -30,13 +30,13 @@ typedef struct _log_work
     pid_t ttid;
     kuid_t uid;
     kuid_t euid;
-    const char *target_func;
     struct path *target_path;
     struct path *exe_path;
 } log_work;
 
-// kprobes
-struct kprobe kprobes[WRAPPERS];
+// kprobes struff
+static struct kprobe **kprobes;
+bool kps_reg = false; // the register state 
 
 int binary2hexadecimal(const u8 *bin, size_t bin_len, char *buf, size_t buf_len)
 {
@@ -44,9 +44,7 @@ int binary2hexadecimal(const u8 *bin, size_t bin_len, char *buf, size_t buf_len)
     size_t i;
 
     if (buf_len < bin_len * 2 + 1)
-    {
         return -ENOBUFS;
-    }
 
     for (i = 0; i < bin_len; ++i)
     {
@@ -75,7 +73,7 @@ int calculate_checksum(const char *filename, u8 *checksum)
         return -PTR_ERR(file);
     }
 
-    tfm = crypto_alloc_shash("sha256", 0, 0);
+    tfm = crypto_alloc_shash(SHA256, 0, 0);
     if (IS_ERR(tfm))
     {
         pr_err("%s: unable to allocate tfm - err %ld\n", MODNAME, PTR_ERR(tfm));
@@ -144,8 +142,7 @@ void logger(unsigned long data)
     u8 checksum[SHA256_DIGEST_SIZE] = {0};
     int ret, len;
     char *log_entry, *checksum_hex, *target_pathname, *exe_pathname, *buf_target, *buf_exe;
-    char *log_entry_base = "%s\n"
-                           "gid:\t%d\n"
+    char *log_entry_base = "gid:\t%d\n"
                            "ttid:\t%d\n"
                            "uid:\t%d\n"
                            "euid:\t%d\n"
@@ -207,7 +204,6 @@ void logger(unsigned long data)
 skip_checksum:
     // get log entry length
     len = snprintf(NULL, 0, log_entry_base,
-                   work_data->target_func,
                    work_data->gid,
                    work_data->ttid,
                    work_data->uid,
@@ -230,7 +226,6 @@ skip_checksum:
     }
 
     ret = snprintf(log_entry, len + 1, log_entry_base,
-                   work_data->target_func,
                    work_data->gid,
                    work_data->ttid,
                    work_data->uid,
@@ -269,7 +264,6 @@ out_free_work:
 
 static inline int schedule_log_work(log_work *the_log_work, const char *target_func, struct path *target_path, struct path *exe_path)
 {
-    the_log_work->target_func = target_func;
     the_log_work->gid = current->cred->gid;
     the_log_work->ttid = task_pid_vnr(current);
     the_log_work->uid = current->cred->uid;
@@ -294,22 +288,17 @@ static int do_general_wrapper(struct kprobe *ri, struct pt_regs *regs)
     log_work *the_log_work;
     int dfd, ret;
 
-    preempt_disable();
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
     dfd = (int)regs->di;
     filename = (struct filename *)regs->si;
 
     if (IS_ERR(filename))
-        goto out;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        goto out;
+        return 0;
     }
 
     ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
@@ -347,7 +336,7 @@ static int do_general_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
-        goto out;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -357,8 +346,6 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-out:
-    preempt_enable();
     return 0;
 }
 
@@ -370,26 +357,19 @@ static int do_renameat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
     int dfd, ret;
     bool first = true;
 
-    preempt_disable();
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
     dfd = (int)regs->di;
     filename = (struct filename *)regs->si;
 
-newname:
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        goto out;
+        return 0;
     }
 
+newname:
     if (IS_ERR(filename))
         goto out_free_path;
-
-    // pr_notice("%s: dfd %d - filename %s\n", MODNAME, dfd, filename->name);
 
     ret = user_path_at(dfd, filename->uptr, LOOKUP_FOLLOW, target_path);
     if (ret)
@@ -407,7 +387,8 @@ newname:
             dfd = (int)regs->dx;
             filename = (struct filename *)regs->cx;
             path_put(target_path);
-            kfree(target_path);
+            target_path->dentry = NULL;
+            target_path->mnt = NULL;
             goto newname;
         }
         goto out_put_path;
@@ -437,12 +418,8 @@ newname:
         goto out_free_exe;
     }
 
-    ret = schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path);
-    if (!ret)
-    {
-        // pr_notice("%s: dfd %d - filename %s log_work scheduled\n", MODNAME, dfd, filename->name);
-        goto out;
-    }
+    if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -452,8 +429,6 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-out:
-    preempt_enable();
     return 0;
 }
 
@@ -467,26 +442,21 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
     size_t len;
     char *buf, *last;
 
-    preempt_disable();
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
     dfd = (int)regs->di;
     filename = (struct filename *)regs->si;
 
     if (IS_ERR(filename))
-        goto out;
+        return 0;
 
     len = strlen(filename->name);
     if (len == 0)
-        goto out;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        goto out;
+        return 0;
     }
 
     buf = (char *)kmalloc(len + 1, GFP_ATOMIC);
@@ -579,7 +549,7 @@ static int do_mkdirat_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
-        goto out;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -589,8 +559,6 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-out:
-    preempt_enable();
     return 0;
 }
 
@@ -602,22 +570,17 @@ static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
     log_work *the_log_work;
     int dfd, flags, ret;
 
-    preempt_disable();
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
     dfd = (int)regs->di;
     flags = ((struct open_how *)regs->dx)->flags;
 
     if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
-        goto out;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        goto out;
+        return 0;
     }
 
     ret = user_path_at(dfd, (const char __user *)regs->si, LOOKUP_FOLLOW, target_path);
@@ -719,7 +682,7 @@ static int do_sys_openat2_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
-        goto out;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -729,8 +692,6 @@ out_put_path:
     path_put(target_path);
 out_free_path:
     kfree(target_path);
-out:
-    preempt_enable();
     return 0;
 }
 
@@ -740,21 +701,16 @@ static int file_open_root_wrapper(struct kprobe *ri, struct pt_regs *regs)
     log_work *the_log_work;
     int flags;
 
-    preempt_disable();
-
-    if (monitor_state == OFF || monitor_state == REC_OFF)
-        goto out;
-
     flags = regs->dx;
 
     if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT))
-        goto out;
+        return 0;
 
     target_path = (struct path *)kmalloc(sizeof(struct path), GFP_ATOMIC);
     if (!target_path)
     {
         pr_err("%s: %s failed memory allocation for struct path\n", MODNAME, ri->symbol_name);
-        goto out;
+        return 0;
     }
 
     memcpy(target_path, (struct path *)regs->di, sizeof(struct path));
@@ -787,7 +743,7 @@ static int file_open_root_wrapper(struct kprobe *ri, struct pt_regs *regs)
     }
 
     if (!schedule_log_work(the_log_work, ri->symbol_name, target_path, exe_path))
-        goto out;
+        return 0;
 
     kfree(the_log_work);
 out_free_exe:
@@ -796,49 +752,149 @@ out_free_exe:
 out_put_path:
     path_put(target_path);
     kfree(target_path);
-out:
-    preempt_enable();
     return 0;
 }
 
-int register_wrappers(void)
-{
-    int i, ret;
-
-    kprobes[0].symbol_name = do_unlinkat;
-    kprobes[0].pre_handler = do_general_wrapper;
-
-    kprobes[1].symbol_name = do_rmdir;
-    kprobes[1].pre_handler = do_general_wrapper;
-
-    kprobes[2].symbol_name = do_renameat2;
-    kprobes[2].pre_handler = do_renameat2_wrapper;
-
-    kprobes[3].symbol_name = do_mkdirat;
-    kprobes[3].pre_handler = do_mkdirat_wrapper;
-
-    kprobes[4].symbol_name = do_sys_openat2;
-    kprobes[4].pre_handler = do_sys_openat2_wrapper;
-
-    kprobes[5].symbol_name = file_open_root;
-    kprobes[5].pre_handler = file_open_root_wrapper;
-
-    for (i = 0; i < WRAPPERS; i++)
-    {
-        ret = register_kprobe(&kprobes[i]);
-        if (ret)
-            pr_err("%s: kprobes %s register failed, error %d\n", MODNAME, kprobes[i].symbol_name, ret);
-        else
-            pr_info("%s: kprobes %s register success\n", MODNAME, kprobes[i].symbol_name);
-    }
-
-    return ret;
-}
-
-void unregister_wrappers(void)
+int init_wrappers(void)
 {
     int i;
 
+    kprobes = kmalloc_array(WRAPPERS, sizeof(struct kprobe *), GFP_KERNEL);
+    if (!kprobes)
+    {
+        pr_err("%s: Memory allocation for kprobes array failed\n", MODNAME);
+        return -ENOMEM;
+    }
+
     for (i = 0; i < WRAPPERS; i++)
-        unregister_kprobe(&kprobes[i]);
+    {
+        kprobes[i] = kmalloc(sizeof(struct kprobe), GFP_KERNEL);
+        if (!kprobes[i])
+        {
+            pr_err("%s: Memory allocation for kprobe %d failed\n", MODNAME, i);
+            while (--i >= 0)
+            {
+                kfree(kprobes[i]);
+            }
+            kfree(kprobes);
+            return -ENOMEM;
+        }
+        memset(kprobes[i], 0, sizeof(struct kprobe));
+    }
+
+    kprobes[0]->symbol_name = do_unlinkat;
+    kprobes[0]->pre_handler = do_general_wrapper;
+
+    kprobes[1]->symbol_name = do_rmdir;
+    kprobes[1]->pre_handler = do_general_wrapper;
+
+    kprobes[2]->symbol_name = do_renameat2;
+    kprobes[2]->pre_handler = do_renameat2_wrapper;
+
+    kprobes[3]->symbol_name = do_mkdirat;
+    kprobes[3]->pre_handler = do_mkdirat_wrapper;
+
+    kprobes[4]->symbol_name = do_sys_openat2;
+    kprobes[4]->pre_handler = do_sys_openat2_wrapper;
+
+    kprobes[5]->symbol_name = file_open_root;
+    kprobes[5]->pre_handler = file_open_root_wrapper;
+
+    if (register_kprobes(kprobes, WRAPPERS))
+        return -1;
+    kps_reg = true;
+    return 0;;
+}
+
+void cleanup_wrappers(void)
+{
+    int i;
+
+    unregister_kprobes(kprobes, WRAPPERS);
+
+    for (i = 0; i < WRAPPERS; i++)
+        kfree(kprobes[i]);
+
+    kfree(kprobes);
+
+    kps_reg = false;
+}
+
+int enable_wrappers(void)
+{
+    int i, tries;
+    bool enabled;
+    int disabled[WRAPPERS] = {0};
+
+    if (!kps_reg)
+        return init_wrappers();
+
+    for (i = 0; i < WRAPPERS; i++)
+    {
+        if (kprobe_disabled(kprobes[i]))
+        retry:
+            disabled[i] = enable_kprobe(kprobes[i]);
+    }
+
+    for (i = 0; i < WRAPPERS; i++)
+    {
+        if (disabled[i])
+        {
+            if (tries > MAX_TRIES)
+            {
+                enabled = false;
+                break;
+            }
+            else
+            {
+                tries++;
+                goto retry;
+            }
+        }
+    }
+
+    if (enabled)
+        return 0;
+
+    cleanup_wrappers();
+    return init_wrappers();
+}
+
+void disable_wrappers(void)
+{
+    int i, tries;
+    bool disabled;
+    int enabled[WRAPPERS] = {0};
+
+    if (!kps_reg)
+        return;
+
+    for (i = 0; i < WRAPPERS; i++)
+    {
+        if (!kprobe_disabled(kprobes[i]))
+        retry:
+            enabled[i] = disable_kprobe(kprobes[i]);
+    }
+
+    for (i = 0; i < WRAPPERS; i++)
+    {
+        if (enabled[i])
+        {
+            if (tries > MAX_TRIES)
+            {
+                disabled = false;
+                break;
+            }
+            else
+            {
+                tries++;
+                goto retry;
+            }
+        }
+    }
+
+    if (disabled)
+        return;
+
+    cleanup_wrappers();
 }
